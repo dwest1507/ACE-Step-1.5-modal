@@ -165,6 +165,7 @@ LANGUAGE=en
 | 🐍 **Python API** | Programmatic access for integration | [Guide](./docs/en/INFERENCE.md) |
 | 🌐 **REST API** | HTTP-based async API for services | [Guide](./docs/en/API.md) |
 | ⌨️ **CLI** | Interactive wizard and configuration | [Guide](./docs/en/CLI.md) |
+| ☁️ **Modal Serverless** | Deploy scale-to-zero API on Modal GPUs | [Guide](./docs/en/MODAL_GUIDE.md) |
 
 ### Setup & Configuration
 
