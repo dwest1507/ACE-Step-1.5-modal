@@ -948,6 +948,17 @@ def _env_bool(name: str, default: bool) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+# Pre-loaded model references (set by external entry points like Modal before create_app)
+_preloaded_handler: Optional["AceStepHandler"] = None
+_preloaded_llm: Optional["LLMHandler"] = None
+
+
+def set_preloaded_models(handler: "AceStepHandler", llm_handler: "LLMHandler") -> None:
+    """Inject pre-loaded model handlers (e.g. from a Modal GPU memory snapshot)."""
+    global _preloaded_handler, _preloaded_llm
+    _preloaded_handler = handler
+    _preloaded_llm = llm_handler
+
 
 
 def _get_model_name(config_path: str) -> str:
@@ -1256,8 +1267,8 @@ def create_app() -> FastAPI:
         os.environ.setdefault("TRITON_CACHE_DIR", triton_cache_root)
         os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", inductor_cache_root)
 
-        handler = AceStepHandler()
-        llm_handler = LLMHandler()
+        handler = _preloaded_handler or AceStepHandler()
+        llm_handler = _preloaded_llm or LLMHandler()
         init_lock = asyncio.Lock()
         app.state._initialized = False
         app.state._init_error = None
@@ -2189,9 +2200,15 @@ def create_app() -> FastAPI:
         print(f"{'='*60}\n")
 
         if no_init:
-            print("[API Server] --no-init mode: Skipping all model loading at startup")
-            print("[API Server] Models will be lazy-loaded on first request")
-            print("[API Server] Server is ready to accept requests (models not loaded yet)")
+            if _preloaded_handler:
+                app.state._initialized = True
+                if _preloaded_llm and getattr(_preloaded_llm, 'llm_initialized', False):
+                    app.state._llm_initialized = True
+                print("[API Server] Using pre-loaded models (external entry point / Modal snapshot)")
+            else:
+                print("[API Server] --no-init mode: Skipping all model loading at startup")
+                print("[API Server] Models will be lazy-loaded on first request")
+                print("[API Server] Server is ready to accept requests (models not loaded yet)")
         else:
             print("[API Server] Initializing models at startup...")
 

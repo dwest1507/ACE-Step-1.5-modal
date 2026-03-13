@@ -16,8 +16,8 @@ We will create a specific script (`modal_app.py`) designed to run within Modal's
 - **Image Definition**: We will define a `modal.Image.debian_slim()` that installs Python dependencies (`uv`, `vllm`, `torch`, `acestep` requirements).
 - **Model Volumes**: We will utilize a `modal.Volume` or `modal.sandbox` approach to download and cache the Hugging Face weights to prevent re-downloading them on every cold start.
 - **App Configuration**: We will define a `modal.App("acestep-api")`.
-- **API Definition**: We will use `@app.function()` with a web endpoint (`@modal.web_endpoint` or ASGI app with FastAPI). The API will mirror the existing `acestep-api` functionality to handle text-to-music generation requests.
-- **Parameterization**: We will use Modal's Secrets or environment variables to allow users to specify which LM model they want to load (e.g., `ACESTEP_LM_MODEL=1.7B` by default, but overrideable).
+- **API Definition**: We will use a `@app.cls()` with memory snapshotting (`@modal.enter(snap=True)`) to load models into GPU memory, and expose the ASGI app with FastAPI via `@modal.asgi_app()`. The API will mirror the existing `acestep-api` functionality to handle text-to-music generation requests.
+- **Parameterization**: We will use environment variables from .env or .env.example to allow users to specify which LM model they want to load (e.g., `ACESTEP_LM_MODEL_PATH=acestep-5Hz-lm-1.7B` by default, but overrideable). The appropriate GPU will be selected based on the model size. In addition the approapriate, model download command will be selected based on the model size.
 
 ### Affected/New Files
 
@@ -25,7 +25,7 @@ We will create a specific script (`modal_app.py`) designed to run within Modal's
 The main entry point for Modal. It will contain:
 1. Docker image setup.
 2. Build step to download models.
-3. The Modal app and web API setup.
+3. The Modal app class and memory snapshot setup.
 
 #### [NEW] `docs/en/MODAL_GUIDE.md`
 A Markdown guide detailing:
@@ -39,17 +39,21 @@ Add a section linking to the new Modal deployment guide under the launch options
 
 ## 3. Task Checklist
 
-- [ ] **Phase 1: Modal Script Creation**
-  - [ ] Create `modal_app.py`.
-  - [ ] Define the Modal Image and dependency installation.
-  - [ ] Implement the model caching/downloading logic.
-  - [ ] Implement the FastAPI/REST endpoint structure.
-  - [ ] Add environment variable support for changing the LM model (defaulting to 1.7B).
-- [ ] **Phase 2: Documentation**
-  - [ ] Create `docs/en/MODAL_GUIDE.md`.
-  - [ ] Write deployment instructions and API usage examples.
-  - [ ] Update [README.md](file:///home/david/Projects/open-source/ACE-Step-1.5/README.md) to reference the new guide.
+- [x] **Phase 1: Modal Script Creation**
+  - [x] Create `modal_app.py`.
+  - [x] Define the Modal Image and dependency installation.
+  - [x] Implement the model caching/downloading logic.
+  - [x] Implement the FastAPI/REST endpoint structure.
+  - [x] Add environment variable support for changing the LM model (defaulting to 1.7B).
+- [x] **Phase 2: Documentation**
+  - [x] Create `docs/en/MODAL_GUIDE.md`.
+  - [x] Write deployment instructions and API usage examples.
+  - [x] Update [README.md](file:///home/david/Projects/open-source/ACE-Step-1.5/README.md) to reference the new guide.
 - [ ] **Phase 3: Testing & Verification**
-  - [ ] Run `modal shell` or `modal serve` locally to test image build.
-  - [ ] Verify the API endpoint responds correctly to requests.
+  - [x] Run `modal shell` or `modal serve` locally to test image build.
+  - [x] Verify the API endpoint responds correctly to requests.
   - [ ] Final code review before opening the Pull Request.
+- [ ] **Phase 4: Future Improvements**
+  - [ ] **nanovllm Memory Snapshot Compatibility** — The Modal deployment currently uses `backend="pt"` (PyTorch) for the LLM because nanovllm (`backend="vllm"`) contains CRIU-incompatible constructs (`threading.Lock`, `atexit.register`, `mp.get_context("spawn")`, CUDA graph capture) that prevent GPU memory snapshotting. The desired end state is to use the faster nanovllm backend with full snapshot support. Two paths forward:
+    1. **Update nanovllm**: Refactor its `LLMEngine`/`ModelRunner` to defer CRIU-incompatible initialization (locks, atexit, multiprocessing, CUDA graphs) until after snapshot restore, or make them lazily initialized.
+    2. **Work with Modal**: Investigate whether Modal can extend their CRIU-based snapshotting to handle these constructs (threading locks, atexit handlers), which would benefit any inference engine with similar patterns.
