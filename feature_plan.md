@@ -37,6 +37,18 @@ A Markdown guide detailing:
 #### [MODIFY] [README.md](file:///home/david/Projects/open-source/ACE-Step-1.5/README.md)
 Add a section linking to the new Modal deployment guide under the launch options.
 
+#### [MODIFY] `acestep/api_server.py`
+Added `set_preloaded_models()` function and module-level globals (`_preloaded_handler`, `_preloaded_llm`) to support pre-loaded model injection from Modal. These are passed through to the refactored helper modules below.
+
+> [!NOTE]
+> Upstream refactored `api_server.py` from a monolithic file into a thin orchestrator that delegates to helper modules under `acestep/api/`. The preloaded-model support was adapted to this new architecture.
+
+#### [MODIFY] `acestep/api/lifespan_runtime.py`
+Added optional `preloaded_handler` and `preloaded_llm` parameters to `initialize_lifespan_runtime()`. When provided, these pre-initialized handlers are used instead of creating new instances.
+
+#### [MODIFY] `acestep/api/startup_model_init.py`
+Added optional `preloaded_handler` and `preloaded_llm` parameters to `initialize_models_at_startup()`. In `no_init` mode, preloaded models are recognized as already-initialized.
+
 ## 3. Task Checklist
 
 - [x] **Phase 1: Modal Script Creation**
@@ -53,6 +65,10 @@ Add a section linking to the new Modal deployment guide under the launch options
   - [x] Run `modal shell` or `modal serve` locally to test image build.
   - [x] Verify the API endpoint responds correctly to requests.
   - [ ] Final code review before opening the Pull Request.
+- [x] **Phase 3.5: Upstream Merge Integration**
+  - [x] Merge `main` into `feature/modal-support` and resolve conflicts.
+  - [x] Adapt preloaded-model support to main's refactored `acestep/api/` module architecture.
+  - [x] Verify existing unit tests pass with changes.
 - [ ] **Phase 4: Future Improvements**
   - [ ] **nanovllm Memory Snapshot Compatibility** — The Modal deployment currently uses `backend="pt"` (PyTorch) for the LLM because nanovllm (`backend="vllm"`) contains CRIU-incompatible constructs (`threading.Lock`, `atexit.register`, `mp.get_context("spawn")`, CUDA graph capture) that prevent GPU memory snapshotting. The desired end state is to use the faster nanovllm backend with full snapshot support. Two paths forward:
     1. **Update nanovllm**: Refactor its `LLMEngine`/`ModelRunner` to defer CRIU-incompatible initialization (locks, atexit, multiprocessing, CUDA graphs) until after snapshot restore, or make them lazily initialized.

@@ -71,6 +71,10 @@ curl -X POST "https://<YOUR-MODAL-WORKSPACE>--acestep-api-fastapi-app.modal.run/
 
 In the JSON response returned by either of these API calls, you will find a `result` object containing a field named `first_audio_path`. This represents your generated track's location within the remote container (for example, `/workspace/.cache/acestep/tmp/api_audio/2c9c279c-b3a8-42f0-a3e9-cf2ee2dbd021.mp3`). The unique UUID is randomly assigned for every new audio generation task.
 
+If you do not receive a response, check the App Logs in the Modal dashboard. The path should be listed there.
+
+Please note, the first time you deploy the model, it will take a few minutes to download the model weights to the container. Subsequent deployments will be much faster as the model weights will be cached. Also, your modal deployment will scale to zero when not in use, so you will not be charged for compute time when the model is not in use. But as a result, there will be cold starts for your first request after a 5-minute period of inactivity. This will result in a longer response time for the first request (around 1 minute). Subsequent requests will be faster as the model will be cached. This can all be customized in modal_app.py if you desire. This default behavior is optimized for cost savings not performance.
+
 To download this file from your Modal app to your local machine, use the `/v1/audio` endpoint and pass this exact path:
 
 ```bash
