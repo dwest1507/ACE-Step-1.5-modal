@@ -12,11 +12,40 @@ import torch
 from loguru import logger
 
 from acestep.constants import DEFAULT_DIT_INSTRUCTION
+from acestep.core.generation.handler.repaint_waveform_splice import (
+    apply_repaint_waveform_splice,
+)
 from acestep.gpu_config import (
     DIT_INFERENCE_VRAM_PER_BATCH,
     VRAM_SAFETY_MARGIN_GB,
+    get_dit_type_from_path,
     get_effective_free_vram_gb,
 )
+
+
+def _resolve_repaint_config(
+    mode: str = "balanced",
+    strength: float = 0.5,
+) -> tuple:
+    """Convert repaint mode and strength into concrete numeric parameters.
+
+    Higher *strength* means more aggressive repainting (less source preservation).
+
+    Args:
+        mode: One of ``"conservative"``, ``"balanced"``, or ``"aggressive"``.
+        strength: 0.0 = conservative (max preservation), 1.0 = aggressive
+            (pure diffusion).  Only effective in balanced mode.
+
+    Returns:
+        Tuple of ``(injection_ratio, crossfade_frames, wav_crossfade_sec)``.
+    """
+    strength = max(0.0, min(1.0, strength))
+    if mode == "aggressive":
+        return 0.0, 0, 0.0
+    if mode == "conservative":
+        return 1.0, 25, 0.05
+    inv = 1.0 - strength
+    return inv, round(25 * inv), 0.05 * inv
 
 
 class GenerateMusicMixin:
@@ -25,6 +54,53 @@ class GenerateMusicMixin:
     The host class is expected to implement helper methods invoked by this
     orchestration flow.
     """
+
+    def _verify_decoder_device_dtype(self) -> None:
+        """Ensure all decoder parameters are on ``self.device`` and ``self.dtype``.
+
+        CPU-offload round-trips can leave PEFT/LoRA adapter weights on the
+        wrong device or in the wrong dtype, which silently produces NaN/Inf
+        during the diffusion forward pass.  This method detects and fixes
+        such mismatches before generation begins.
+        """
+        decoder = getattr(self.model, "decoder", None)
+        if decoder is None:
+            return
+
+        wrong_device = []
+        wrong_dtype = []
+        for name, param in decoder.named_parameters():
+            if not self._is_on_target_device(param, self.device):
+                wrong_device.append(name)
+            if param.is_floating_point() and param.dtype != self.dtype:
+                wrong_dtype.append(name)
+
+        if wrong_device or wrong_dtype:
+            if wrong_device:
+                logger.warning(
+                    f"[generate_music] LoRA sanity check: {len(wrong_device)} decoder "
+                    f"parameters on wrong device (expected {self.device}), fixing: "
+                    f"{wrong_device[:5]}{'...' if len(wrong_device) > 5 else ''}"
+                )
+            if wrong_dtype:
+                logger.warning(
+                    f"[generate_music] LoRA sanity check: {len(wrong_dtype)} decoder "
+                    f"parameters have wrong dtype (expected {self.dtype}), fixing: "
+                    f"{wrong_dtype[:5]}{'...' if len(wrong_dtype) > 5 else ''}"
+                )
+            decoder.to(device=self.device, dtype=self.dtype)
+
+        # Final verification — use recursive move if simple .to() wasn't enough
+        still_wrong = [
+            name for name, p in decoder.named_parameters()
+            if not self._is_on_target_device(p, self.device)
+        ]
+        if still_wrong:
+            logger.warning(
+                f"[generate_music] {len(still_wrong)} params still on wrong device "
+                f"after decoder.to(), using recursive move"
+            )
+            self._recursive_to_device(decoder, self.device, self.dtype)
 
     def _vram_preflight_check(
         self,
@@ -60,8 +136,17 @@ class GenerateMusicMixin:
             return None
 
         duration_s = audio_duration or 60.0
+        # Determine actual model size (XL vs standard) and CFG mode.
+        config_path = ""
+        if getattr(self, "last_init_params", None):
+            config_path = self.last_init_params.get("config_path", "")
+        dit_type = get_dit_type_from_path(config_path)
+        is_xl = dit_type.startswith("xl_")
         # CFG doubles forward-pass memory: two DiT evaluations per step.
-        dit_key = "base" if guidance_scale > 1.0 else "turbo"
+        if guidance_scale > 1.0:
+            dit_key = "xl_base" if is_xl else "base"
+        else:
+            dit_key = "xl_turbo" if is_xl else "turbo"
         per_batch_gb = DIT_INFERENCE_VRAM_PER_BATCH.get(dit_key, 0.6)
         # Longer audio = more latent frames (5 Hz rate) = more memory.
         duration_factor = max(1.0, duration_s / 60.0)
@@ -121,11 +206,18 @@ class GenerateMusicMixin:
         cfg_interval_end: float = 1.0,
         shift: float = 1.0,
         infer_method: str = "ode",
+        sampler_mode: str = "euler",
+        velocity_norm_threshold: float = 0.0,
+        velocity_ema_factor: float = 0.0,
         use_tiled_decode: bool = True,
         timesteps: Optional[List[float]] = None,
         latent_shift: float = 0.0,
         latent_rescale: float = 1.0,
         chunk_mask_mode: str = "auto",
+        repaint_latent_crossfade_frames: int = 10,
+        repaint_wav_crossfade_sec: float = 0.0,
+        repaint_mode: str = "balanced",
+        repaint_strength: float = 0.5,
         progress=None,
     ) -> Dict[str, Any]:
         """Generate audio from text/reference inputs and return response payload.
@@ -164,6 +256,25 @@ class GenerateMusicMixin:
             instruction=instruction,
         )
 
+        # Turbo models bake guidance into the distillation process and do not
+        # use CFG.  Forcing guidance_scale to 1.0 avoids double-application of
+        # guidance that produces noise or NaN/Inf on float16 (see issue #927).
+        if self.is_turbo_model() and guidance_scale != 1.0:
+            logger.info(
+                "[generate_music] Turbo model detected: overriding "
+                "guidance_scale {:.1f} -> 1.0 (turbo does not use CFG).",
+                guidance_scale,
+            )
+            guidance_scale = 1.0
+
+        # When LoRA is active, verify all decoder parameters are on the
+        # expected device and dtype.  CPU-offload round-trips can leave PEFT
+        # adapter weights on the wrong device, causing NaN in the diffusion
+        # forward pass.  The check is cheap and prevents a hard-to-debug
+        # generation failure.
+        if getattr(self, "lora_loaded", False) and getattr(self, "use_lora", False):
+            self._verify_decoder_device_dtype()
+
         logger.info("[generate_music] Starting generation...")
         if progress:
             progress(0.51, desc="Preparing inputs...")
@@ -193,6 +304,12 @@ class GenerateMusicMixin:
             if audio_error is not None:
                 return audio_error
 
+            # Cover/repaint/lego/extract: lock duration to source audio.
+            if processed_src_audio is not None and task_type in (
+                "cover", "repaint", "lego", "extract",
+            ):
+                audio_duration = processed_src_audio.shape[-1] / self.sample_rate
+
             service_inputs = self._prepare_generate_music_service_inputs(
                 actual_batch_size=actual_batch_size,
                 processed_src_audio=processed_src_audio,
@@ -219,6 +336,10 @@ class GenerateMusicMixin:
             if vram_error is not None:
                 return vram_error
 
+            injection_ratio, resolved_cf_frames, resolved_wav_cf = (
+                _resolve_repaint_config(repaint_mode, repaint_strength)
+            )
+
             service_run = self._run_generate_music_service_with_progress(
                 progress=progress,
                 actual_batch_size=actual_batch_size,
@@ -236,6 +357,11 @@ class GenerateMusicMixin:
                 cfg_interval_end=cfg_interval_end,
                 shift=shift,
                 infer_method=infer_method,
+                sampler_mode=sampler_mode,
+                velocity_norm_threshold=velocity_norm_threshold,
+                velocity_ema_factor=velocity_ema_factor,
+                repaint_crossfade_frames=resolved_cf_frames,
+                repaint_injection_ratio=injection_ratio,
             )
             outputs = service_run["outputs"]
             infer_steps_for_progress = service_run["infer_steps_for_progress"]
@@ -254,6 +380,22 @@ class GenerateMusicMixin:
                 use_tiled_decode=use_tiled_decode,
                 time_costs=time_costs,
             )
+            repainting_start_batch = service_inputs.get("repainting_start_batch")
+            repainting_end_batch = service_inputs.get("repainting_end_batch")
+            do_wav_splice = (
+                repaint_mode != "aggressive"
+                and repainting_start_batch is not None
+                and repainting_end_batch is not None
+            )
+            if do_wav_splice:
+                pred_wavs = apply_repaint_waveform_splice(
+                    pred_wavs=pred_wavs,
+                    src_wavs=service_inputs["target_wavs_tensor"],
+                    repainting_starts=repainting_start_batch,
+                    repainting_ends=repainting_end_batch,
+                    sample_rate=self.sample_rate,
+                    crossfade_duration=resolved_wav_cf,
+                )
             result = self._build_generate_music_success_payload(
                 outputs=outputs,
                 pred_wavs=pred_wavs,
