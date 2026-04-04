@@ -14,11 +14,34 @@
 
 ## Configuration
 
-By default, the deployment uses the `1.7B` LM model (`acestep-5Hz-lm-1.7B`), which provides a good balance between speed and VRAM usage. This allows the model to comfortably fit within common Modal GPUs like the A10G.
+By default, the deployment uses the standard `turbo` DiT model (`acestep-v15-turbo`) with the `1.7B` LM model (`acestep-5Hz-lm-1.7B`), which provides a good balance between quality, speed, and VRAM usage. This fits comfortably on an A10G (24 GB).
 
-If you wish to configure the Language Model or other environment variables, you should define them in your `.env` file (e.g., `ACESTEP_LM_MODEL_PATH=acestep-5Hz-lm-0.6B`), and then upload this configuration as a Modal Workspace Secret.
+### Choosing a DiT Model
 
-Run the following command in the project root:
+The DiT model controls audio generation quality. Set `ACESTEP_CONFIG_PATH` in your `.env`:
+
+| DiT Model | VRAM (weights) | Quality | Speed | `.env` value |
+|-----------|---------------|---------|-------|-------------|
+| `acestep-v15-turbo` (default) | ~4.7 GB | Very High | Fast (8 steps) | `ACESTEP_CONFIG_PATH=acestep-v15-turbo` |
+| `acestep-v15-sft` | ~4.7 GB | High | Slower (50 steps) | `ACESTEP_CONFIG_PATH=acestep-v15-sft` |
+| `acestep-v15-xl-turbo` | ~9 GB | Very High | Fast (8 steps) | `ACESTEP_CONFIG_PATH=acestep-v15-xl-turbo` |
+| `acestep-v15-xl-sft` | ~9 GB | Very High | Slower (50 steps) | `ACESTEP_CONFIG_PATH=acestep-v15-xl-sft` |
+| `acestep-v15-xl-base` | ~9 GB | High | Slower (50 steps) | `ACESTEP_CONFIG_PATH=acestep-v15-xl-base` |
+
+The **XL (4B DiT)** models offer higher audio quality but require more VRAM (~9 GB for weights alone vs ~4.7 GB for standard models). They need at least 20 GB recommended, making A10G (24 GB) the minimum GPU for XL.
+
+### Choosing an LM Model
+
+The LM model handles lyric/caption generation. Set `ACESTEP_LM_MODEL_PATH` in your `.env`:
+
+- `acestep-5Hz-lm-0.6B` -- Lightweight, good for low-VRAM setups
+- `acestep-5Hz-lm-1.7B` (default) -- Best balance of quality and speed
+- `acestep-5Hz-lm-4B` -- Highest quality, requires A100
+
+### Uploading Configuration
+
+Define your choices in `.env`, then upload as a Modal Workspace Secret:
+
 ```bash
 uv run modal secret create ace-step-api-secrets --from-dotenv .env --force
 ```
@@ -26,15 +49,18 @@ uv run modal secret create ace-step-api-secrets --from-dotenv .env --force
 
 *(Note: If you are using a gated model on Hugging Face, you'll need to create a Modal Secret named `huggingface-secret` containing your `HF_TOKEN`, or include `HF_TOKEN` in your `.env` before running the command above.)*
 
-The GPU configuration in Modal will be automatically selected based on the LM model size. The table below shows the GPU configuration for each LM model:
+### GPU Auto-Selection
 
-| LM Model | GPU Configuration |
-|----------|-------------------|
-| `acestep-5Hz-lm-0.6B` | `L4` |
-| `acestep-5Hz-lm-1.7B` | `A10G` |
-| `acestep-5Hz-lm-4B` | `A100` |
+The GPU is automatically selected based on your model combination:
 
-*Caution: Compute costs will increase with the size of the model. Please refer to the [Modal pricing page](https://modal.com/pricing) for more information.*
+| Configuration | GPU | VRAM |
+|--------------|-----|------|
+| Standard DiT + 0.6B LM | L4 | 24 GB |
+| Standard DiT + 1.7B LM | A10G | 24 GB |
+| XL DiT + any LM (except 4B) | A10G | 24 GB |
+| Any DiT + 4B LM | A100 | 40/80 GB |
+
+*Caution: Compute costs increase with GPU tier. Please refer to the [Modal pricing page](https://modal.com/pricing) for more information.*
 
 ## Deploying
 

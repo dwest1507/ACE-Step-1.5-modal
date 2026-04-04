@@ -19,6 +19,7 @@ app = modal.App("acestep-api")
 # Note: these are read locally at `modal deploy` time to configure the image/container.
 # At runtime, the Modal Secret "ace-step-api-secrets" re-populates these inside the container.
 LM_MODEL_PATH = os.environ.get("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-1.7B")
+CONFIG_PATH = os.environ.get("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
 
 # Definition of the models to download during image build
 def download_models():
@@ -32,7 +33,16 @@ def download_models():
         local_dir="/workspace/checkpoints"
     )
 
-    # Optional: download other models if ACESTEP_LM_MODEL_PATH is customized
+    # Download XL DiT model if configured (separate repo from the default 2B models)
+    config_path = os.environ.get("ACESTEP_CONFIG_PATH", "acestep-v15-turbo")
+    if "xl" in config_path:
+        print(f"Downloading XL DiT model: {config_path}...")
+        snapshot_download(
+            repo_id=f"ACE-Step/{config_path}",
+            local_dir=f"/workspace/checkpoints/{config_path}"
+        )
+
+    # Download alternative LM models if configured
     lm_path = os.environ.get("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-1.7B")
     if "0.6B" in lm_path:
         print("Downloading ACE-Step-5Hz-lm-0.6B...")
@@ -48,22 +58,27 @@ def download_models():
         )
 
 def _modal_gpu_string() -> str:
-    """Return the optimal Modal GPU string based on the configured LM model.
+    """Return the optimal Modal GPU string based on the configured models.
 
-    This intentionally uses only string-matching against LM_MODEL_PATH and avoids
-    importing torch or any GPU-probing code. `modal deploy` runs this function on
-    the *local* machine (which may be CPU-only), so any torch import here would
-    break deployment from dev machines.
+    This intentionally uses only string-matching and avoids importing torch or
+    any GPU-probing code. `modal deploy` runs this function on the *local*
+    machine (which may be CPU-only), so any torch import here would break
+    deployment from dev machines.
 
-    GPU ↔ model mapping:
-      0.6B → L4   (24 GB, cost-effective for the smallest model)
-      1.7B → A10G (24 GB, good balance of speed and cost)
-      4B   → A100 (40/80 GB, required for the largest model)
+    GPU selection considers both the DiT model (standard 2B vs XL 4B) and the
+    LM model size:
+      Standard DiT + 0.6B LM → L4   (24 GB, cost-effective)
+      Standard DiT + 1.7B LM → A10G (24 GB, good balance)
+      XL DiT (any LM)        → A10G (24 GB, ≥20GB recommended for XL)
+      4B LM (any DiT)        → A100 (40/80 GB, required for largest LM)
     """
     lm = LM_MODEL_PATH.upper()
+    config = CONFIG_PATH.upper()
+    xl_dit = "XL" in config
+
     if "4B" in lm:
         return "A100"
-    elif "1.7B" in lm:
+    elif xl_dit or "1.7B" in lm:
         return "A10G"
     else:
         return "L4"
@@ -72,13 +87,28 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git", "ffmpeg")
     .pip_install("uv", "hf-transfer")
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+    .env({
+        "HF_HUB_ENABLE_HF_TRANSFER": "1",
+        # torchcodec 0.11.0 needs libnvrtc.so.13 (CUDA 13) but cu128 only ships
+        # libnvrtc.so.12.  Force torchaudio to use soundfile backend instead.
+        "TORCHAUDIO_USE_BACKEND": "soundfile",
+    })
     .add_local_dir(".", remote_path="/workspace", ignore=[".git", ".venv", "**/.venv", "__pycache__", "**/*.pyc", "checkpoints", "logs"], copy=True)
     .workdir("/workspace")
-    # Install dependencies according to the existing project
+    # Install project dependencies first, then upgrade torch to cu130.
+    # torchaudio 2.10 uses torchcodec 0.11.0 which needs libnvrtc.so.13 (CUDA 13).
+    # The pyproject.toml pins cu128, but cu130 torch is ABI-compatible and brings
+    # the CUDA 13 runtime libs that torchcodec needs.  Finally, register the
+    # nvidia pip-managed lib dirs with ldconfig so the dynamic linker can find them.
     .run_commands(
-        "uv pip install --system torch==2.5.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124",
-        "uv pip install --system -e ."
+        "uv pip install --system -e .",
+        "uv pip install --system --upgrade torch==2.10.0+cu130 torchaudio==2.10.0+cu130 torchvision==0.25.0+cu130 --index-url https://download.pytorch.org/whl/cu130",
+        # 1. Discover nvidia pip lib dirs and write to ldconfig conf
+        'python -c "import nvidia, pathlib; [print(p) for p in {str(p.parent) for p in pathlib.Path(nvidia.__path__[0]).rglob(\'lib/libnv*.so*\')}]" > /etc/ld.so.conf.d/nvidia-pip.conf',
+        # 2. Create missing soname symlinks (e.g. libnvrtc.so.13 → libnvrtc.so.13.0.88)
+        "python /workspace/scripts/fix_nvidia_sonames.py",
+        # 3. Run ldconfig to register all libs (including new symlinks)
+        "ldconfig",
     )
     .run_function(
         download_models,

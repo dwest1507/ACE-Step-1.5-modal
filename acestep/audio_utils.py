@@ -159,13 +159,9 @@ class AudioSaver:
             temp_wav_path = Path(temp_wav.name)
 
         try:
-            torchaudio.save(
-                str(temp_wav_path),
-                tensor_to_save,
-                int(target_sample_rate),
-                channels_first=True,
-                backend='soundfile',
-            )
+            import soundfile as sf
+            audio_np = tensor_to_save.transpose(0, 1).numpy()  # -> [samples, channels]
+            sf.write(str(temp_wav_path), audio_np, int(target_sample_rate), subtype='PCM_16', format='WAV')
             cmd = [
                 'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
                 '-i', str(temp_wav_path),
@@ -278,31 +274,18 @@ class AudioSaver:
                     backend='ffmpeg',
                 )
             elif format in ["flac", "wav", "wav32"]:
-                # FLAC and WAV use soundfile backend (fastest)
-                # handle 32-bit float wav
+                # FLAC/WAV/WAV32: use soundfile directly (no torchcodec dependency).
+                # torchaudio 2.10 always delegates to torchcodec for save() regardless
+                # of the backend= parameter, which requires CUDA NPP libs that may not
+                # be available in all environments.
+                import soundfile as sf
+                audio_np = audio_tensor.transpose(0, 1).numpy()  # -> [samples, channels]
                 if format == "wav32":
-                    try:
-                        import soundfile as sf
-                        
-                        # Use soundfile directly for 32-bit float
-                        audio_np = audio_tensor.transpose(0, 1).numpy() # [channels, samples] -> [samples, channels]
-                        
-                        # Explicitly specify format as WAV to avoid issues with extension detection or custom extensions
-                        sf.write(str(output_path), audio_np, sample_rate, subtype='FLOAT', format='WAV')
-                        logger.debug(f"[AudioSaver] Saved audio to {output_path} (wav32, {sample_rate}Hz)")
-                        return str(output_path)
-                    except Exception as e:
-                        logger.error(f"Failed to save wav32: {e}, falling back to standard wav")
-                        format = "wav"
-                        # Fallthrough to standard wav saving
-
-                torchaudio.save(
-                    str(output_path),
-                    audio_tensor,
-                    sample_rate,
-                    channels_first=True,
-                    backend='soundfile',
-                )
+                    sf.write(str(output_path), audio_np, sample_rate, subtype='FLOAT', format='WAV')
+                elif format == "wav":
+                    sf.write(str(output_path), audio_np, sample_rate, subtype='PCM_16', format='WAV')
+                else:  # flac
+                    sf.write(str(output_path), audio_np, sample_rate, format='FLAC')
             else:
                 # Other formats use default backend
                 torchaudio.save(
