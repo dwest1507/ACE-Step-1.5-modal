@@ -109,6 +109,45 @@ class JobLlmPreparationTests(unittest.TestCase):
         self.assertEqual("4/4", prepared.time_signature)
         self.assertEqual(12.0, prepared.audio_duration)
 
+    def test_sample_mode_passes_english_vocal_language_to_create_sample(self) -> None:
+        """vocal_language='en' should be passed to create_sample_fn, not ignored."""
+
+        req = self._base_req()
+        req.sample_mode = True
+        req.sample_query = "a rap song"
+        req.vocal_language = "en"
+        sample_result = SimpleNamespace(
+            success=True,
+            caption="cap",
+            lyrics="lyrics",
+            bpm=120,
+            keyscale="C major",
+            timesignature="4/4",
+            duration=60.0,
+        )
+        app_state = SimpleNamespace(
+            _llm_initialized=True,
+            _llm_init_error=None,
+            _llm_lazy_load_disabled=False,
+        )
+        llm = MagicMock()
+        mock_create_sample = MagicMock(return_value=sample_result)
+
+        prepare_llm_generation_inputs(
+            app_state=app_state,
+            llm_handler=llm,
+            req=req,
+            selected_handler_device="cuda",
+            parse_description_hints=MagicMock(return_value=(None, False)),
+            create_sample_fn=mock_create_sample,
+            format_sample_fn=MagicMock(),
+            ensure_llm_ready_fn=MagicMock(),
+            log_fn=MagicMock(),
+        )
+
+        call_kwargs = mock_create_sample.call_args[1]
+        self.assertEqual("en", call_kwargs["vocal_language"])
+
     def test_prepare_llm_generation_inputs_disables_optional_cot_when_llm_unavailable(self) -> None:
         """Optional CoT flags should auto-disable when LLM is unavailable but not required."""
 
