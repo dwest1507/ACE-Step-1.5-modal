@@ -204,5 +204,96 @@ class StartupModelInitTests(unittest.TestCase):
         self.assertEqual("boom", app.state._init_error)
 
 
+class PreloadedModelInjectionTests(unittest.TestCase):
+    """Behavior tests for the pre-loaded (Modal GPU snapshot) injection path."""
+
+    def _initialize(self, app, preloaded_handler, preloaded_llm):
+        """Run startup init in preloaded mode with the GPU probe stubbed out."""
+
+        with (
+            patch("acestep.api.startup_model_init.initialize_llm_at_startup") as mock_llm_startup,
+            patch("acestep.api.startup_model_init.set_global_gpu_config"),
+            patch("acestep.api.startup_model_init.get_gpu_config", return_value=_gpu_config()),
+        ):
+            initialize_models_at_startup(
+                app=app,
+                handler=MagicMock(),
+                llm_handler=MagicMock(),
+                handler2=None,
+                handler3=None,
+                config_path2="",
+                config_path3="",
+                get_project_root=MagicMock(return_value="/workspace"),
+                get_model_name=MagicMock(return_value="acestep-v15-turbo"),
+                ensure_model_downloaded=MagicMock(),
+                env_bool=lambda _name, default: default,
+                preloaded_handler=preloaded_handler,
+                preloaded_llm=preloaded_llm,
+            )
+        return mock_llm_startup
+
+    def test_preloaded_handler_marks_models_initialized(self) -> None:
+        """A snapshot-resident DiT model must not be re-initialized on first request."""
+
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        mock_llm_startup = self._initialize(
+            app,
+            preloaded_handler=MagicMock(),
+            preloaded_llm=SimpleNamespace(llm_initialized=True),
+        )
+
+        self.assertTrue(app.state._initialized)
+        mock_llm_startup.assert_not_called()
+
+    def test_preloaded_llm_that_loaded_is_marked_available(self) -> None:
+        """An LM restored with the snapshot stays usable without a reload."""
+
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        self._initialize(
+            app,
+            preloaded_handler=MagicMock(),
+            preloaded_llm=SimpleNamespace(llm_initialized=True),
+        )
+
+        self.assertTrue(app.state._llm_initialized)
+        self.assertFalse(getattr(app.state, "_llm_lazy_load_disabled", False))
+        self.assertIsNone(getattr(app.state, "_llm_init_error", None))
+
+    def test_preloaded_llm_that_failed_blocks_request_time_reload(self) -> None:
+        """A snapshot deployment must not re-init the LM inside a request.
+
+        llm_readiness would resolve the backend from the request, whose
+        lm_backend field defaults to "vllm" rather than None -- so the
+        deployment's ACESTEP_LM_BACKEND=pt never applies and a CRIU-incompatible
+        nanovllm load would start on a restored container. Reporting the LM as
+        unavailable keeps the outcome deterministic instead.
+        """
+
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        self._initialize(
+            app,
+            preloaded_handler=MagicMock(),
+            preloaded_llm=SimpleNamespace(llm_initialized=False),
+        )
+
+        self.assertTrue(app.state._initialized)
+        self.assertFalse(app.state._llm_initialized)
+        self.assertTrue(app.state._llm_lazy_load_disabled)
+        self.assertIn("snapshot", app.state._llm_init_error)
+
+    def test_missing_preloaded_llm_blocks_request_time_reload(self) -> None:
+        """An entry point that injects only a DiT handler gets the same guard."""
+
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        self._initialize(app, preloaded_handler=MagicMock(), preloaded_llm=None)
+
+        self.assertTrue(app.state._llm_lazy_load_disabled)
+        self.assertIsNotNone(app.state._llm_init_error)
+
+
 if __name__ == "__main__":
     unittest.main()

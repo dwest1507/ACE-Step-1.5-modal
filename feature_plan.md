@@ -69,6 +69,61 @@ Added optional `preloaded_handler` and `preloaded_llm` parameters to `initialize
   - [x] Merge `main` into `feature/modal-support` and resolve conflicts.
   - [x] Adapt preloaded-model support to main's refactored `acestep/api/` module architecture.
   - [x] Verify existing unit tests pass with changes.
+- [ ] **Phase 3.6: Second Upstream Merge (main @ `ca1e85f`)**
+  - [x] Merge `main` into the feature branch and resolve conflicts in `pyproject.toml`,
+        `acestep/audio_utils.py`, and `acestep/audio_utils_test.py`.
+  - [x] Drop the fork's `_save_mp3` soundfile patch in favour of upstream's equivalent
+        (upstream independently moved off `torchaudio.save` and added `detach().cpu()`
+        plus a contiguity guard). The fork's `save_audio` FLAC/WAV/WAV32 patch is kept —
+        upstream still routes those through `torchaudio.save(backend='soundfile')`, which
+        torchaudio 2.10 delegates to torchcodec.
+  - [x] Confirm the preloaded-model injection points survived upstream's API-layer churn
+        (`initialize_lifespan_runtime`, `initialize_models_at_startup`,
+        `ensure_models_initialized` fast path).
+  - [x] Pin `ACESTEP_PROJECT_ROOT=/workspace` in the Modal image. Checkpoint resolution
+        (`model_downloader.get_project_root`) falls back to `os.getcwd()`, and upstream
+        added `ACESTEP_CHECKPOINTS_DIR` as a second override — both now resolve
+        deterministically to the baked-in `/workspace/checkpoints`.
+  - [x] Bake `ACESTEP_CONFIG_PATH` / `ACESTEP_LM_MODEL_PATH` / `ACESTEP_LM_BACKEND=pt`
+        into the image env so a Secret that omits them cannot load different models than
+        the image was built with. **Correction (Phase 3.7):** the `ACESTEP_LM_BACKEND`
+        half does not reach `api/llm_readiness.py` as originally claimed — see below.
+  - [x] Verify no test regressions against an `origin/main` baseline: 977 passed, and
+        the failure set is identical apart from two `release_task_audio_paths_test`
+        cases that only fail on the baseline because that checkout lived under `/tmp`
+        (the test asserts against the system temp dir). Every remaining failure
+        reproduces on unmodified `main`.
+  - [ ] **Human verification required:** run `uv run modal deploy modal_app.py` and
+        exercise the deployed endpoint. No real deployment was made as part of this merge.
+- [ ] **Phase 3.7: Review Fixes for the Second Upstream Merge**
+  - [x] Close the request-time LM reload on snapshot deployments. Baking
+        `ACESTEP_LM_BACKEND=pt` into the image does not protect the `/release_task`
+        path: `api/llm_readiness.py` resolves
+        `req.lm_backend or os.getenv("ACESTEP_LM_BACKEND") or "vllm"`, and
+        `GenerateMusicRequest.lm_backend` defaults to the *string* `"vllm"` rather than
+        `None`, so the request always wins and the env var is never read. The pin does
+        still cover `/create_random_sample` and `/format_input`, which read it directly.
+        `startup_model_init` now marks the LM unavailable
+        (`_llm_lazy_load_disabled` + `_llm_init_error`) when the snapshot did not
+        restore it, so optional LLM features auto-disable and required ones fail with a
+        clear message instead of pulling nanovllm into a restored container.
+  - [x] Cover the fork's `save_audio` FLAC/WAV/WAV32 soundfile patch with tests. It is
+        the only fork divergence left in a file upstream actively edits, and the
+        upstream `audio_utils_test.py` adopted in Phase 3.6 asserts nothing about it —
+        a future merge could revert it with the suite still green, breaking FLAC and
+        WAV at runtime on Modal. Verified the new tests fail against both a simulated
+        revert and the pre-fix code.
+  - [x] Give the direct-soundfile path the same input normalization as upstream's
+        `_save_mp3` (`_to_soundfile_array`: detach, cpu, dim guard, contiguous).
+        Mono 1-D audio previously raised `IndexError` from an unconditional
+        `transpose(0, 1)`, in both the primary branch and the fallback.
+  - [x] Document the `ACESTEP_LM_BACKEND=pt` requirement in `docs/en/MODAL_GUIDE.md`.
+        `.env.example` ships `vllm` uncommented and a Modal Secret overrides the image
+        default, so the guide's own `--from-dotenv .env` step was undoing the pin.
+  - [ ] **Human verification still required:** as Phase 3.6. Note that DCW arrived with
+        the upstream merge and defaults *on* for turbo models
+        (`_resolve_dcw_enabled` → `is_turbo_model()`), so generated audio will differ
+        from the previous deployment even with an unchanged request payload.
 - [ ] **Phase 4: Future Improvements**
   - [ ] **nanovllm Memory Snapshot Compatibility** — The Modal deployment currently uses `backend="pt"` (PyTorch) for the LLM because nanovllm (`backend="vllm"`) contains CRIU-incompatible constructs (`threading.Lock`, `atexit.register`, `mp.get_context("spawn")`, CUDA graph capture) that prevent GPU memory snapshotting. The desired end state is to use the faster nanovllm backend with full snapshot support. Two paths forward:
     1. **Update nanovllm**: Refactor its `LLMEngine`/`ModelRunner` to defer CRIU-incompatible initialization (locks, atexit, multiprocessing, CUDA graphs) until after snapshot restore, or make them lazily initialized.

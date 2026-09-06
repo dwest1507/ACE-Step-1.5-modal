@@ -22,6 +22,23 @@ import torchaudio
 from loguru import logger
 
 
+def _to_soundfile_array(audio_tensor: torch.Tensor) -> np.ndarray:
+    """Convert a ``[channels, samples]`` tensor into soundfile's layout.
+
+    soundfile wants ``[samples, channels]`` (or 1-D for mono) on the CPU, in a
+    contiguous buffer, and ``.numpy()`` refuses a tensor that still carries
+    autograd history. The dim check matters because mono audio reaches
+    ``save_audio`` as a 1-D tensor, which has no dimension 1 to transpose.
+
+    Mirrors the normalization ``AudioSaver._save_mp3`` performs inline, so the
+    direct-soundfile FLAC/WAV path accepts exactly the same inputs as MP3.
+    """
+    array = audio_tensor.detach().cpu()
+    if array.dim() == 2:
+        array = array.transpose(0, 1)
+    return array.contiguous().numpy()
+
+
 def apply_fade(
     audio_data: Union[torch.Tensor, np.ndarray],
     fade_in_samples: int = 0,
@@ -160,15 +177,23 @@ class AudioSaver:
 
         try:
             import soundfile as sf
-            audio_np = tensor_to_save.transpose(0, 1).numpy()  # -> [samples, channels]
-            sf.write(str(temp_wav_path), audio_np, int(target_sample_rate), subtype='PCM_16', format='WAV')
+
+            audio_np = tensor_to_save.detach().cpu()
+            if audio_np.dim() == 2:
+                audio_np = audio_np.transpose(0, 1)
+            audio_np = audio_np.contiguous()
+            sf.write(
+                str(temp_wav_path),
+                audio_np.numpy(),
+                int(target_sample_rate),
+                format="WAV",
+            )
             cmd = [
                 'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
                 '-i', str(temp_wav_path),
                 '-codec:a', 'libmp3lame',
                 '-ar', str(int(target_sample_rate)),
                 '-b:a', bitrate,
-                '-abr', '0',
                 str(output_path),
             ]
             subprocess.run(cmd, check=True, capture_output=True, timeout=120)
@@ -279,7 +304,7 @@ class AudioSaver:
                 # of the backend= parameter, which requires CUDA NPP libs that may not
                 # be available in all environments.
                 import soundfile as sf
-                audio_np = audio_tensor.transpose(0, 1).numpy()  # -> [samples, channels]
+                audio_np = _to_soundfile_array(audio_tensor)
                 if format == "wav32":
                     sf.write(str(output_path), audio_np, sample_rate, subtype='FLOAT', format='WAV')
                 elif format == "wav":
@@ -304,7 +329,7 @@ class AudioSaver:
                 raise
             try:
                 import soundfile as sf
-                audio_np = audio_tensor.transpose(0, 1).numpy()  # -> [samples, channels]
+                audio_np = _to_soundfile_array(audio_tensor)
                 
                 # Handle wav32 fallback formatting
                 if format == "wav32":
@@ -599,4 +624,3 @@ def save_audio(
         mp3_bitrate,
         mp3_sample_rate,
     )
-

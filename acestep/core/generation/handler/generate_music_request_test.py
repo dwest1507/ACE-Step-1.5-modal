@@ -27,7 +27,9 @@ class _Host(GenerateMusicRequestMixin):
         self.prepare_batch_data = lambda *args, **kwargs: (
             ["cap"], ["inst"], ["lyr"], ["en"], ["meta"]
         )
-        self.determine_task_type = lambda task, codes: (False, False, task == "cover", True)
+        self.determine_task_type = lambda task, codes: (
+            False, False, task in ("cover", "cover-nofsq"), True
+        )
         self.prepare_padding_info = lambda *args, **kwargs: ([0.0], [1.0], torch.zeros(1, 2, 100))
 
 
@@ -44,6 +46,32 @@ class GenerateMusicRequestMixinTests(unittest.TestCase):
         )
         self.assertEqual(task, "cover")
         self.assertNotEqual(instruction, "old")
+
+    def test_neutralize_cover_params_reset_for_text2music(self):
+        """text2music must drop leaked cover params to neutral (issue #1271)."""
+        host = _Host()
+        strength, noise = host._neutralize_cover_only_params(
+            task_type="text2music",
+            audio_cover_strength=0.0,
+            cover_noise_strength=0.2,
+        )
+        self.assertEqual((strength, noise), (1.0, 0.0))
+
+    def test_neutralize_cover_params_preserved_for_src_audio_tasks(self):
+        """Tasks operating on real source audio/codes must keep their params.
+
+        Only text2music lacks real source content (it runs on a silence
+        latent); every other task type -- including repaint/lego/extract/
+        complete, not just cover -- must be unaffected by this guard.
+        """
+        host = _Host()
+        for task in ("cover", "cover-nofsq", "repaint", "lego", "extract", "complete"):
+            strength, noise = host._neutralize_cover_only_params(
+                task_type=task,
+                audio_cover_strength=0.3,
+                cover_noise_strength=0.15,
+            )
+            self.assertEqual((strength, noise), (0.3, 0.15), task)
 
     def test_prepare_runtime_normalizes_batch_and_duration(self):
         """Runtime helper should clamp batch floor and normalize invalid duration/end values."""
@@ -139,6 +167,20 @@ class GenerateMusicRequestMixinTests(unittest.TestCase):
         self.assertFalse(error["success"])
         self.assertIn("requires source audio", error["error"])
 
+    def test_cover_nofsq_no_src_audio_no_codes_errors(self):
+        """Raw cover task without src_audio and without audio codes should error."""
+        host = _Host()
+        _, _, error = host._prepare_reference_and_source_audio(
+            reference_audio=None,
+            src_audio=None,
+            audio_code_string="",
+            actual_batch_size=1,
+            task_type="cover-nofsq",
+        )
+        self.assertIsNotNone(error)
+        self.assertFalse(error["success"])
+        self.assertIn("requires source audio", error["error"])
+
     def test_repaint_no_src_audio_with_codes_succeeds(self):
         """Repaint task should succeed without src_audio when audio codes are provided."""
         host = _Host()
@@ -155,7 +197,7 @@ class GenerateMusicRequestMixinTests(unittest.TestCase):
     def test_should_return_intermediate_always_true(self):
         """Intermediate tensors must always be returned for LRC generation support."""
         host = _Host()
-        for task in ("text2music", "cover", "repaint"):
+        for task in ("text2music", "cover", "cover-nofsq", "repaint"):
             inputs = host._prepare_generate_music_service_inputs(
                 actual_batch_size=1,
                 processed_src_audio=None,

@@ -18,32 +18,39 @@ def build_cover_strength_controls() -> dict[str, Any]:
         A component map containing audio/code strength sliders and remix help group.
     """
 
-    audio_cover_strength = gr.Slider(
-        minimum=0.0,
-        maximum=1.0,
-        value=1.0,
-        step=0.01,
-        label=t("generation.codes_strength_label"),
-        info=t("generation.codes_strength_info"),
-        elem_classes=["has-info-container"],
-        visible=True,
-    )
-    with gr.Group(visible=False) as remix_help_group:
+    with gr.Group(visible=False, elem_classes=["has-info-container"]) as remix_help_group:
         create_help_button("generation_remix")
-    cover_noise_strength = gr.Slider(
-        minimum=0.0,
-        maximum=1.0,
-        value=0.0,
-        step=0.01,
-        label=t("generation.cover_noise_strength_label"),
-        info=t("generation.cover_noise_strength_info"),
-        elem_classes=["has-info-container"],
-        visible=False,
-    )
+        audio_cover_strength = gr.Slider(
+            minimum=0.0,
+            maximum=1.0,
+            value=1.0,
+            step=0.01,
+            label=t("generation.codes_strength_label"),
+            info=t("generation.codes_strength_info"),
+            elem_classes=["has-info-container"],
+            visible=True,
+        )
+        cover_noise_strength = gr.Slider(
+            minimum=0.0,
+            maximum=1.0,
+            value=0.0,
+            step=0.01,
+            label=t("generation.cover_noise_strength_label"),
+            info=t("generation.cover_noise_strength_info"),
+            elem_classes=["has-info-container"],
+            visible=False,
+        )
+        no_fsq = gr.Checkbox(
+            label="no_fsq",
+            value=False,
+            info="Use source-audio latents directly instead of FSQ-quantized audio codes.",
+            elem_classes=["has-info-container"],
+        )
     return {
-        "audio_cover_strength": audio_cover_strength,
         "remix_help_group": remix_help_group,
+        "audio_cover_strength": audio_cover_strength,
         "cover_noise_strength": cover_noise_strength,
+        "no_fsq": no_fsq,
     }
 
 
@@ -164,3 +171,5 @@ def build_repainting_controls() -> dict[str, Any]:
         "repaint_strength": repaint_strength,
         "repaint_strength_memory": repaint_strength_memory,
     }
+
+

@@ -91,6 +91,21 @@ def do_model_initialization(
         print(f"[API Server] ERROR: Primary model failed to load: {status_msg}")
         raise RuntimeError(status_msg)
     app.state._initialized = True
+    # Captured for on-demand model switching (ACESTEP_ON_DEMAND_MODEL_LOAD):
+    # a later request for an unloaded model re-runs initialize_service on the
+    # primary handler with these same kwargs. Named distinctly from the
+    # lazy-init kwargs some runtimes store as _model_init_kwargs, which have
+    # an incompatible do_model_initialization(**kwargs) shape.
+    app.state._service_init_kwargs = {
+        "project_root": project_root,
+        "device": device,
+        "use_flash_attention": use_flash_attention,
+        "compile_model": compile_model,
+        "offload_to_cpu": offload_to_cpu,
+        "offload_dit_to_cpu": offload_dit_to_cpu,
+    }
+    app.state._checkpoint_dir = checkpoint_dir
+    app.state._ensure_model_downloaded = ensure_model_downloaded
     print(f"[API Server] Primary model loaded: {get_model_name(config_path)}")
 
     if handler2 and config_path2:
@@ -221,10 +236,47 @@ def initialize_models_at_startup(
     # Pre-loaded model injection (e.g. from Modal GPU memory snapshot).
     # Setting _initialized=True causes ensure_models_initialized() to fast-path,
     # so the lazy-load path never fires.
+    #
+    # app.state._service_init_kwargs is deliberately left unset here: it only
+    # drives on-demand model switching (ACESTEP_ON_DEMAND_MODEL_LOAD), which
+    # would swap the snapshot-resident model for one fetched at request time.
+    # job_model_selection treats missing kwargs as "fall back to the primary
+    # model and log", which is the correct outcome for a snapshot deployment
+    # that ships exactly one DiT model in its image.
     if preloaded_handler is not None:
         app.state._initialized = True
         if preloaded_llm and getattr(preloaded_llm, 'llm_initialized', False):
             app.state._llm_initialized = True
+        else:
+            # The LM did not come back with the snapshot, and a restored container
+            # must not re-initialize it at request time. Both lazy paths would pick
+            # the backend themselves: llm_readiness resolves
+            # `req.lm_backend or os.getenv("ACESTEP_LM_BACKEND") or "vllm"`, and
+            # GenerateMusicRequest.lm_backend defaults to the string "vllm" rather
+            # than None -- so the request always wins and the deployment's
+            # ACESTEP_LM_BACKEND=pt is never consulted. That would load nanovllm,
+            # whose CRIU-incompatible internals are the reason this deployment pins
+            # the PyTorch backend in the first place.
+            #
+            # Recording the failure instead makes the outcome deterministic and
+            # self-explanatory: optional LLM features (use_cot_caption,
+            # use_cot_language) auto-disable, requests that genuinely require the
+            # LM fail with the message below, and /create_random_sample and
+            # /format_input surface it rather than starting a multi-GB download
+            # inside a request. Both flags are set because the two readers differ
+            # -- llm_readiness short-circuits on _llm_init_error, while
+            # model_init_service clears _llm_lazy_load_disabled when an operator
+            # re-initializes the LM deliberately through /models.
+            app.state._llm_initialized = False
+            app.state._llm_lazy_load_disabled = True
+            app.state._llm_init_error = (
+                "LLM was not restored with the GPU snapshot. Request-time LLM "
+                "initialization is disabled for snapshot deployments because it "
+                "would load a different backend than the image was built with. "
+                "Redeploy so the snapshot captures the LM, or run without "
+                "pre-loaded models."
+            )
+            print("[API Server] Pre-loaded LLM unavailable; lazy LLM init disabled")
         print("[API Server] Using pre-loaded models (external entry point / Modal snapshot)")
         return
 
