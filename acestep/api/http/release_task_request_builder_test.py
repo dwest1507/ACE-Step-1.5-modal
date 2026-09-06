@@ -2,6 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
+from typing import Any
 
 from acestep.api.http.release_task_request_builder import build_generate_music_request
 
@@ -14,10 +15,14 @@ class _FakeParser:
 
         self._values = values
 
-    def get(self, key: str):
-        """Return raw value for ``key`` from parser payload."""
+    def get(self, key: str, default: Any = None):
+        """Return raw value for ``key``, or ``default`` when absent.
 
-        return self._values.get(key)
+        Mirrors ``RequestParser.get``, which production calls with a default.
+        """
+
+        value = self._values.get(key)
+        return default if value is None else value
 
     def str(self, key: str, default: str = "") -> str:
         """Return string value for ``key`` with default fallback."""

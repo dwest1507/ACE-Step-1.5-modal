@@ -75,6 +75,18 @@ class SampleFormatRoutesHttpTests(unittest.TestCase):
             env_bool=lambda *_: False,
             to_int=lambda v, d=None: int(v) if v is not None else d,
             to_float=lambda v, d=None: float(v) if v is not None else d,
+            create_sample_fn=lambda **_kwargs: SimpleNamespace(
+                success=True,
+                caption="c",
+                lyrics="l",
+                bpm=100,
+                keyscale="C",
+                timesignature="4/4",
+                duration=8,
+                language="en",
+                error=None,
+                status_message=None,
+            ),
         )
         return TestClient(app)
 

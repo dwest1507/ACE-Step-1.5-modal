@@ -4,6 +4,7 @@ import asyncio
 import json
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
 from fastapi import HTTPException
@@ -19,10 +20,14 @@ class _FakeParser:
 
         self._values = values
 
-    def get(self, key: str):
-        """Return raw value for ``key`` from parser payload."""
+    def get(self, key: str, default: Any = None):
+        """Return raw value for ``key``, or ``default`` when absent.
 
-        return self._values.get(key)
+        Mirrors ``RequestParser.get``, which production calls with a default.
+        """
+
+        value = self._values.get(key)
+        return default if value is None else value
 
     def str(self, key: str, default: str = "") -> str:
         """Return string value for ``key`` with default fallback."""
@@ -220,10 +225,11 @@ class ReleaseTaskRequestParserTests(unittest.TestCase):
                     return []
                 return value if isinstance(value, list) else [value]
 
-            def get(self, key: str):
-                """Return scalar value for the requested key."""
+            def get(self, key: str, default: Any = None):
+                """Return scalar value for the key, or ``default`` when absent."""
 
-                return self._values.get(key)
+                value = self._values.get(key)
+                return default if value is None else value
 
         async def _save_upload_to_temp(_upload, *, prefix: str) -> str:
             """Return deterministic temp file path for uploaded payload."""
