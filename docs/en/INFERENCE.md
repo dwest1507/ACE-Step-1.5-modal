@@ -193,6 +193,7 @@ class GenerationParams:
     
     repainting_start: float = 0.0
     repainting_end: float = -1
+    chunk_mask_mode: str = "auto"
     audio_cover_strength: float = 1.0
     
     # 5Hz Language Model Parameters
@@ -350,6 +351,16 @@ class FormatSampleResult:
 
 ### Generation Parameters
 
+> **💡 Turbo parameter handling.** The defaults in the tables below (`guidance_scale=7.0`, `shift=1.0`) target the **base/SFT** models. When you select a **turbo** model (`acestep-v15-turbo`, `acestep-v15-xl-turbo`), note that the two CFG/timestep parameters are handled differently:
+>
+> | Parameter | Turbo behavior |
+> |-----------|----------------|
+> | `inference_steps` | `8` is already the turbo default. |
+> | `guidance_scale` | **Auto-corrected** to `1.0` by the pipeline — turbo bakes guidance into distillation and does not use CFG, so any value you pass is overridden (see `acestep/core/generation/handler/generate_music.py`). No action needed. |
+> | `shift` | **Not** auto-corrected. The default `1.0` is applied as-is; set **`shift=3.0`** for turbo (as the `shift` row below recommends). |
+>
+> In other words, the only timestep/guidance parameter you need to set manually for turbo is `shift=3.0`.
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `inference_steps` | `int` | `8` | Number of denoising steps. Turbo model: 1-20 (recommended 8). Base model: 1-200 (recommended 32-64). Higher = better quality but slower. |
@@ -378,6 +389,7 @@ class FormatSampleResult:
 | `audio_codes` | `str` | `""` | Pre-extracted 5Hz audio semantic codes as a string. Advanced use only. |
 | `repainting_start` | `float` | `0.0` | Repainting start time in seconds (for repaint/lego tasks). |
 | `repainting_end` | `float` | `-1` | Repainting end time in seconds. Use `-1` for end of audio. |
+| `chunk_mask_mode` | `str` | `"auto"` | Chunk-mask control mode. Use `"explicit"` to pass the 0/1 mask derived from `repainting_start`/`repainting_end`; `"auto"` uses automatic chunk control. |
 | `audio_cover_strength` | `float` | `1.0` | Strength of audio cover/codes influence (0.0-1.0). Set smaller (0.2) for style transfer tasks. |
 
 ### 5Hz Language Model Parameters
@@ -505,9 +517,13 @@ params = GenerationParams(
     src_audio="original.mp3",
     repainting_start=10.0,  # seconds
     repainting_end=20.0,    # seconds
+    chunk_mask_mode="explicit",
     caption="smooth transition with piano solo",
 )
 ```
+
+Use `chunk_mask_mode="explicit"` when the selected Repaint interval must be passed as
+the model chunk mask. Gradio Repaint selects this mode automatically.
 
 **Required**:
 - `src_audio`: Path to source audio file

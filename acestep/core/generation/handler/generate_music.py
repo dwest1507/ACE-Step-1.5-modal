@@ -5,6 +5,7 @@ This module provides the public ``generate_music`` entry point extracted from
 """
 
 import gc
+import os
 import traceback
 from typing import Any, Dict, List, Optional, Union
 
@@ -177,6 +178,20 @@ class GenerateMusicMixin:
             "error": msg,
         }
 
+    def _resolve_dcw_enabled(self, dcw_enabled: Optional[bool]) -> bool:
+        """Resolve an explicit or model-aware DCW setting.
+
+        Args:
+            dcw_enabled: Explicit caller choice, or ``None`` for the model
+                family default.
+
+        Returns:
+            The explicit choice, or the loaded configuration's Turbo setting.
+        """
+        if dcw_enabled is not None:
+            return bool(dcw_enabled)
+        return bool(self.is_turbo_model())
+
     def generate_music(
         self,
         captions: str,
@@ -209,6 +224,11 @@ class GenerateMusicMixin:
         sampler_mode: str = "euler",
         velocity_norm_threshold: float = 0.0,
         velocity_ema_factor: float = 0.0,
+        dcw_enabled: Optional[bool] = None,
+        dcw_mode: str = "double",
+        dcw_scaler: float = 0.05,
+        dcw_high_scaler: float = 0.02,
+        dcw_wavelet: str = "haar",
         use_tiled_decode: bool = True,
         timesteps: Optional[List[float]] = None,
         latent_shift: float = 0.0,
@@ -218,6 +238,15 @@ class GenerateMusicMixin:
         repaint_wav_crossfade_sec: float = 0.0,
         repaint_mode: str = "balanced",
         repaint_strength: float = 0.5,
+        source_repaint_latents: Optional[torch.Tensor] = None,
+        retake_seed: Optional[Union[str, float, int]] = None,
+        retake_variance: float = 0.0,
+        flow_edit_morph: bool = False,
+        flow_edit_source_caption: str = "",
+        flow_edit_source_lyrics: str = "",
+        flow_edit_n_min: float = 0.0,
+        flow_edit_n_max: float = 1.0,
+        flow_edit_n_avg: int = 1,
         progress=None,
     ) -> Dict[str, Any]:
         """Generate audio from text/reference inputs and return response payload.
@@ -231,10 +260,22 @@ class GenerateMusicMixin:
             guidance_scale: CFG guidance value.
             seed: Optional explicit seed from caller/UI.
             infer_method: Diffusion method name.
+            dcw_enabled: Enable Differential Correction in Wavelet domain.
+                ``None`` selects the default for the loaded model family.
+            dcw_mode: DCW mode — ``"low"`` / ``"high"`` / ``"double"`` / ``"pix"``.
+            dcw_scaler: Low-band (or single-band) correction strength; modulated
+                by ``t_curr`` inside the sampler, so the effective strength decays
+                from ``dcw_scaler`` at ``t=1`` to 0 at ``t=0``.
+            dcw_high_scaler: High-band strength — only used in ``"double"`` mode.
+            dcw_wavelet: PyWavelets basis, e.g. ``"haar"`` / ``"db4"`` / ``"sym8"``.
+                On the MLX path only ``"haar"`` is implemented natively; other
+                bases warn once and fall back to Haar.
             timesteps: Optional custom timestep schedule.
             use_tiled_decode: Whether tiled VAE decode is used.
             latent_shift: Additive latent post-processing value.
             latent_rescale: Multiplicative latent post-processing value.
+            source_repaint_latents: Optional cached source latents used for
+                generated-source repaint instead of repaint-time VAE encoding.
             progress: Optional callback taking ``(ratio, desc=...)``.
 
         Returns:
@@ -256,6 +297,15 @@ class GenerateMusicMixin:
             instruction=instruction,
         )
 
+        # Neutralize stale cover-only params for text2music; preserve them for
+        # source-audio tasks. All entry points (single/batch/API) pass through
+        # here (issue #1271).
+        audio_cover_strength, cover_noise_strength = self._neutralize_cover_only_params(
+            task_type=task_type,
+            audio_cover_strength=audio_cover_strength,
+            cover_noise_strength=cover_noise_strength,
+        )
+
         # Turbo models bake guidance into the distillation process and do not
         # use CFG.  Forcing guidance_scale to 1.0 avoids double-application of
         # guidance that produces noise or NaN/Inf on float16 (see issue #927).
@@ -266,6 +316,7 @@ class GenerateMusicMixin:
                 guidance_scale,
             )
             guidance_scale = 1.0
+        dcw_enabled = self._resolve_dcw_enabled(dcw_enabled)
 
         # When LoRA is active, verify all decoder parameters are on the
         # expected device and dtype.  CPU-offload round-trips can leave PEFT
@@ -286,10 +337,14 @@ class GenerateMusicMixin:
             repainting_end=repainting_end,
             seed=seed,
             use_random_seed=use_random_seed,
+            retake_seed=retake_seed,
+            retake_variance=retake_variance,
         )
         actual_batch_size = runtime["actual_batch_size"]
         actual_seed_list = runtime["actual_seed_list"]
         seed_value_for_ui = runtime["seed_value_for_ui"]
+        actual_retake_seed_list = runtime["actual_retake_seed_list"]
+        retake_seed_value_for_ui = runtime["retake_seed_value_for_ui"]
         audio_duration = runtime["audio_duration"]
         repainting_end = runtime["repainting_end"]
 
@@ -300,15 +355,28 @@ class GenerateMusicMixin:
                 audio_code_string=audio_code_string,
                 actual_batch_size=actual_batch_size,
                 task_type=task_type,
+                flow_edit_morph=flow_edit_morph,
             )
             if audio_error is not None:
                 return audio_error
 
-            # Cover/repaint/lego/extract: lock duration to source audio.
-            if processed_src_audio is not None and task_type in (
-                "cover", "repaint", "lego", "extract",
+            # Cover/repaint/lego/extract + text2music+morph: lock duration to source audio.
+            if processed_src_audio is not None and (
+                task_type in ("cover", "cover-nofsq", "repaint", "lego", "extract")
+                or (task_type == "text2music" and flow_edit_morph)
             ):
                 audio_duration = processed_src_audio.shape[-1] / self.sample_rate
+
+            # Flow-edit overlay v1: text2music (silence-context) and
+            # cover / cover-nofsq (shared LM-codes context). Repaint /
+            # extract / lego need paired-CFG derivation per task shape
+            # and are left for follow-up.
+            if flow_edit_morph and task_type not in ("text2music", "cover", "cover-nofsq"):
+                logger.warning(
+                    "[generate_music] flow_edit_morph=True but task_type={!r}; "
+                    "v1 overlay only applies to text2music / cover / cover-nofsq, ignoring.",
+                    task_type,
+                )
 
             service_inputs = self._prepare_generate_music_service_inputs(
                 actual_batch_size=actual_batch_size,
@@ -328,13 +396,26 @@ class GenerateMusicMixin:
                 repainting_end=repainting_end,
                 chunk_mask_mode=chunk_mask_mode,
             )
-            vram_error = self._vram_preflight_check(
-                actual_batch_size=actual_batch_size,
-                audio_duration=audio_duration,
-                guidance_scale=guidance_scale,
-            )
-            if vram_error is not None:
-                return vram_error
+            if torch.cuda.is_available():
+                gc.collect()
+                torch.cuda.empty_cache()
+                skip_preflight = os.environ.get(
+                    "ACESTEP_SKIP_VRAM_PREFLIGHT", "",
+                ).lower() in ("1", "true", "yes")
+                if skip_preflight:
+                    logger.warning(
+                        "[generate_music] VRAM pre-flight check skipped via "
+                        "ACESTEP_SKIP_VRAM_PREFLIGHT=1. If generation OOMs, "
+                        "unset this variable to re-enable the safety check."
+                    )
+                else:
+                    vram_error = self._vram_preflight_check(
+                        actual_batch_size=actual_batch_size,
+                        audio_duration=audio_duration,
+                        guidance_scale=guidance_scale,
+                    )
+                    if vram_error is not None:
+                        return vram_error
 
             injection_ratio, resolved_cf_frames, resolved_wav_cf = (
                 _resolve_repaint_config(repaint_mode, repaint_strength)
@@ -360,8 +441,23 @@ class GenerateMusicMixin:
                 sampler_mode=sampler_mode,
                 velocity_norm_threshold=velocity_norm_threshold,
                 velocity_ema_factor=velocity_ema_factor,
+                dcw_enabled=dcw_enabled,
+                dcw_mode=dcw_mode,
+                dcw_scaler=dcw_scaler,
+                dcw_high_scaler=dcw_high_scaler,
+                dcw_wavelet=dcw_wavelet,
                 repaint_crossfade_frames=resolved_cf_frames,
                 repaint_injection_ratio=injection_ratio,
+                source_repaint_latents=source_repaint_latents,
+                task_type=task_type,
+                actual_retake_seed_list=actual_retake_seed_list,
+                retake_variance=retake_variance,
+                flow_edit_morph=flow_edit_morph,
+                flow_edit_source_caption=flow_edit_source_caption,
+                flow_edit_source_lyrics=flow_edit_source_lyrics,
+                flow_edit_n_min=flow_edit_n_min,
+                flow_edit_n_max=flow_edit_n_max,
+                flow_edit_n_avg=flow_edit_n_avg,
             )
             outputs = service_run["outputs"]
             infer_steps_for_progress = service_run["infer_steps_for_progress"]
@@ -404,6 +500,8 @@ class GenerateMusicMixin:
                 seed_value_for_ui=seed_value_for_ui,
                 actual_batch_size=actual_batch_size,
                 progress=progress,
+                retake_seed_value_for_ui=retake_seed_value_for_ui,
+                retake_variance=retake_variance,
             )
             # Clear GPU tensor references from the mutable outputs dict so
             # accelerator memory is reclaimable before the next generation.

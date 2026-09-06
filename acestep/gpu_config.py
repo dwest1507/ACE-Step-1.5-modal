@@ -262,6 +262,13 @@ class GPUConfig:
     # Controlled via ACESTEP_SAVE_MEMORY=1 environment variable.
     save_memory_mode: bool = False
 
+    # MLX VAE decode chunk size (Apple Silicon only).
+    # Controls the maximum number of latent frames decoded in a single pass.
+    # Larger values decode faster but use more memory.
+    # Auto-detected based on available unified memory; overridable via
+    # ACESTEP_MLX_VAE_CHUNK environment variable.
+    mlx_vae_chunk_size: int = 512
+
 
 def _apply_lm_backend_compatibility_overrides(config: GPUConfig) -> GPUConfig:
     """Apply runtime hardware overrides for LM backend selection."""
@@ -769,6 +776,40 @@ def get_gpu_tier(gpu_memory_gb: float) -> str:
         return "unlimited"
 
 
+def _auto_mlx_vae_chunk_size(mem_gb: Optional[float] = None) -> int:
+    """Select MLX VAE decode chunk size based on available unified memory.
+
+    The ``ACESTEP_MLX_VAE_CHUNK`` environment variable takes highest
+    priority.  Otherwise the chunk size is chosen from a memory-based
+    heuristic targeting Apple Silicon unified-memory configurations.
+
+    Args:
+        mem_gb: GPU/unified memory in GB.  When ``None``, auto-detected
+            via :func:`get_gpu_memory_gb`.
+
+    Returns:
+        Chunk size as a positive integer (minimum 192, to keep
+        ``stride = chunk - 2 * overlap`` positive with overlap=64).
+    """
+    env_val = os.environ.get("ACESTEP_MLX_VAE_CHUNK")
+    if env_val is not None:
+        try:
+            return max(192, int(env_val))
+        except ValueError:
+            pass
+    if mem_gb is None:
+        mem_gb = get_gpu_memory_gb()
+    if mem_gb <= 16:
+        size = 256
+    elif mem_gb <= 36:
+        size = 512
+    elif mem_gb <= 64:
+        size = 1024
+    else:
+        size = 2048
+    return max(192, size)
+
+
 def get_gpu_config(gpu_memory_gb: Optional[float] = None) -> GPUConfig:
     """
     Get GPU configuration based on detected or provided GPU memory.
@@ -842,6 +883,10 @@ def get_gpu_config(gpu_memory_gb: Optional[float] = None) -> GPUConfig:
         if _mps
         else config.get("compile_model_default", True),
         lm_memory_gb=config["lm_memory_gb"],
+        # MPS: auto-tune MLX VAE decode chunk size based on unified memory
+        mlx_vae_chunk_size=_auto_mlx_vae_chunk_size(gpu_memory_gb)
+        if _mps
+        else 512,
     )
     return _apply_lm_backend_compatibility_overrides(config)
 
@@ -996,7 +1041,14 @@ def get_lm_gpu_memory_ratio(
             # Convert to ratio of total GPU memory
             # nano-vllm uses: target_total_usage = total * gpu_memory_utilization
             # We want: (total * ratio) = current_usage + usable_for_lm
-            current_usage_gb = actual_total_gb - free_gb
+            # current_usage = live tensors in the process (memory_allocated), i.e. the
+            # DiT/VAE/text baseline at LM-init since unload() tears down the prior LM
+            # engine first. NOT the driver's total-free, which counts the caching
+            # allocator's `inactive` pool plus the fixed CUDA-context floor — both
+            # grow across reloads and inflate the ratio -> KV cache. The live-tensor
+            # view matches allocate_kv_cache (model_runner.py), so re-init no longer
+            # inflates the KV cache and the LM gets its design-sized budget.
+            current_usage_gb = torch.cuda.memory_allocated() / (1024**3)
             desired_total_usage = current_usage_gb + usable_for_lm
             ratio = desired_total_usage / actual_total_gb
 
@@ -1503,6 +1555,9 @@ def get_gpu_config_for_tier(tier: str) -> GPUConfig:
         if _mps
         else config.get("compile_model_default", True),
         lm_memory_gb=config["lm_memory_gb"],
+        mlx_vae_chunk_size=_auto_mlx_vae_chunk_size(real_gpu_memory)
+        if _mps
+        else 512,
     )
     return _apply_lm_backend_compatibility_overrides(config)
 

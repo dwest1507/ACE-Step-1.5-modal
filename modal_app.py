@@ -92,6 +92,22 @@ image = (
         # torchcodec 0.11.0 needs libnvrtc.so.13 (CUDA 13) but cu128 only ships
         # libnvrtc.so.12.  Force torchaudio to use soundfile backend instead.
         "TORCHAUDIO_USE_BACKEND": "soundfile",
+        # Pin the project root.  Checkpoint resolution (model_downloader.get_project_root,
+        # ProgressMixin._get_project_root) falls back to os.getcwd(), which is only
+        # /workspace by virtue of the image workdir.  Setting this explicitly keeps
+        # checkpoint lookup at /workspace/checkpoints — where download_models() put the
+        # weights — no matter what cwd the snapshot-restored process ends up with.
+        "ACESTEP_PROJECT_ROOT": "/workspace",
+        # Bake the deploy-time model choices in as defaults so the container loads the
+        # same models download_models() baked into the image, even if the Modal Secret
+        # omits them.  A secret that does set them still wins at runtime.
+        "ACESTEP_CONFIG_PATH": CONFIG_PATH,
+        "ACESTEP_LM_MODEL_PATH": LM_MODEL_PATH,
+        # load_models() below pins the LM to the PyTorch backend for CRIU compatibility.
+        # api/llm_readiness.py reloads the LM from this env var if the snapshot load
+        # failed, and defaults to "vllm" when it is unset — which would silently swap
+        # backends mid-deployment.  Keep the two paths in agreement.
+        "ACESTEP_LM_BACKEND": "pt",
     })
     .add_local_dir(".", remote_path="/workspace", ignore=[".git", ".venv", "**/.venv", "__pycache__", "**/*.pyc", "checkpoints", "logs"], copy=True)
     .workdir("/workspace")

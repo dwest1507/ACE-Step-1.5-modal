@@ -109,6 +109,13 @@ class _Host(GenerateMusicMixin):
         self.calls["_resolve_generate_music_task"] = kwargs
         return kwargs["task_type"], kwargs["instruction"]
 
+    def _neutralize_cover_only_params(self, **kwargs):
+        """Mirror ``GenerateMusicRequestMixin``'s text2music-only reset (issue #1271)."""
+        self.calls["_neutralize_cover_only_params"] = kwargs
+        if kwargs["task_type"] == "text2music":
+            return 1.0, 0.0
+        return kwargs["audio_cover_strength"], kwargs["cover_noise_strength"]
+
     def _prepare_generate_music_runtime(self, **kwargs):
         """Capture runtime args and return deterministic runtime state."""
         self.calls["_prepare_generate_music_runtime"] = kwargs
@@ -116,6 +123,8 @@ class _Host(GenerateMusicMixin):
             "actual_batch_size": 1,
             "actual_seed_list": [77],
             "seed_value_for_ui": 77,
+            "actual_retake_seed_list": None,
+            "retake_seed_value_for_ui": "",
             "audio_duration": kwargs["audio_duration"],
             "repainting_end": kwargs["repainting_end"],
         }
@@ -203,6 +212,30 @@ class GenerateMusicMixinTests(unittest.TestCase):
         self.assertEqual(out["error"], "boom")
         self.assertIn("Error: boom", out["status_message"])
 
+    def test_repaint_forwards_cached_source_latents_to_service(self):
+        """Generated-source repaint should only override the source-latent input."""
+        host = _Host()
+        source_latents = torch.ones(4, 3)
+
+        out = host.generate_music(
+            captions="cap",
+            lyrics="lyr",
+            task_type="repaint",
+            repainting_start=1.0,
+            repainting_end=2.0,
+            source_repaint_latents=source_latents,
+        )
+
+        self.assertEqual(out, host._final_payload)
+        self.assertEqual(
+            "repaint",
+            host.calls["_run_generate_music_service_with_progress"]["task_type"],
+        )
+        self.assertIs(
+            source_latents,
+            host.calls["_run_generate_music_service_with_progress"]["source_repaint_latents"],
+        )
+
 
 class VramPreflightCheckTests(unittest.TestCase):
     """Verify ``_vram_preflight_check`` respects CPU offload mode."""
@@ -264,6 +297,58 @@ class VramPreflightCheckTests(unittest.TestCase):
             guidance_scale=7.0,
         )
         self.assertIsNone(result)
+
+
+class VramPreflightOrchestrationTests(unittest.TestCase):
+    """Verify CUDA cleanup and the explicit preflight escape hatch."""
+
+    _GM_MOD = GENERATE_MUSIC_MODULE
+
+    @patch.object(_GM_MOD.gc, "collect")
+    @patch.object(_GM_MOD.torch.cuda, "empty_cache")
+    @patch.object(_GM_MOD.torch.cuda, "is_available", return_value=True)
+    def test_generate_music_runs_preflight_by_default(
+        self, _mock_cuda, mock_empty_cache, mock_collect
+    ):
+        """The safety check stays enabled when no opt-out is requested."""
+        host = _Host()
+        with (
+            patch.dict(
+                self._GM_MOD.os.environ,
+                {"ACESTEP_SKIP_VRAM_PREFLIGHT": ""},
+            ),
+            patch.object(
+                host, "_vram_preflight_check", return_value=None
+            ) as mock_preflight,
+        ):
+            out = host.generate_music(captions="cap", lyrics="lyr")
+
+        self.assertEqual(out, host._final_payload)
+        mock_collect.assert_called_with()
+        mock_empty_cache.assert_called_once_with()
+        mock_preflight.assert_called_once()
+
+    @patch.object(_GM_MOD.gc, "collect")
+    @patch.object(_GM_MOD.torch.cuda, "empty_cache")
+    @patch.object(_GM_MOD.torch.cuda, "is_available", return_value=True)
+    def test_generate_music_skips_preflight_only_when_explicitly_requested(
+        self, _mock_cuda, mock_empty_cache, mock_collect
+    ):
+        """The documented environment flag bypasses only the safety check."""
+        host = _Host()
+        with (
+            patch.dict(
+                self._GM_MOD.os.environ,
+                {"ACESTEP_SKIP_VRAM_PREFLIGHT": "true"},
+            ),
+            patch.object(host, "_vram_preflight_check") as mock_preflight,
+        ):
+            out = host.generate_music(captions="cap", lyrics="lyr")
+
+        self.assertEqual(out, host._final_payload)
+        mock_collect.assert_called_with()
+        mock_empty_cache.assert_called_once_with()
+        mock_preflight.assert_not_called()
 
 
 class TurboGuidanceScaleTests(unittest.TestCase):

@@ -49,6 +49,19 @@ uv run modal secret create ace-step-api-secrets --from-dotenv .env --force
 
 *(Note: If you are using a gated model on Hugging Face, you'll need to create a Modal Secret named `huggingface-secret` containing your `HF_TOKEN`, or include `HF_TOKEN` in your `.env` before running the command above.)*
 
+> [!IMPORTANT]
+> Leave `ACESTEP_CHECKPOINTS_DIR` unset in the `.env` you upload. It is meant for
+> sharing one model directory across several local installs, and setting it
+> redirects checkpoint lookup away from `/workspace/checkpoints` — where the image
+> build already placed the weights — so the container would re-download several GB
+> on every cold start. `modal_app.py` pins `ACESTEP_PROJECT_ROOT=/workspace` for the
+> same reason; do not override it.
+
+`modal_app.py` also bakes the deploy-time values of `ACESTEP_CONFIG_PATH`,
+`ACESTEP_LM_MODEL_PATH` and `ACESTEP_LM_BACKEND=pt` into the image as defaults, so a
+Secret that omits them still loads the models the image was built with. Values you do
+set in the Secret take precedence at runtime.
+
 ### GPU Auto-Selection
 
 The GPU is automatically selected based on your model combination:
