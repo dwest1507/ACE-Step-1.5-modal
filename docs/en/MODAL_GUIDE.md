@@ -50,17 +50,31 @@ uv run modal secret create ace-step-api-secrets --from-dotenv .env --force
 *(Note: If you are using a gated model on Hugging Face, you'll need to create a Modal Secret named `huggingface-secret` containing your `HF_TOKEN`, or include `HF_TOKEN` in your `.env` before running the command above.)*
 
 > [!IMPORTANT]
-> Leave `ACESTEP_CHECKPOINTS_DIR` unset in the `.env` you upload. It is meant for
-> sharing one model directory across several local installs, and setting it
-> redirects checkpoint lookup away from `/workspace/checkpoints` — where the image
-> build already placed the weights — so the container would re-download several GB
-> on every cold start. `modal_app.py` pins `ACESTEP_PROJECT_ROOT=/workspace` for the
-> same reason; do not override it.
+> Two variables in the `.env` you upload need attention, because a Modal Secret
+> overrides the image's own defaults:
+>
+> - **Set `ACESTEP_LM_BACKEND=pt`.** `.env.example` ships `vllm`, and the deployment
+>   requires the PyTorch backend: nanovllm's internals are CRIU-incompatible, so a
+>   container that loads it cannot be restored from a GPU memory snapshot.
+> - **Leave `ACESTEP_CHECKPOINTS_DIR` unset.** It is meant for sharing one model
+>   directory across several local installs, and setting it redirects checkpoint
+>   lookup away from `/workspace/checkpoints` — where the image build already placed
+>   the weights — so the container would re-download several GB on every cold start.
+>   `modal_app.py` pins `ACESTEP_PROJECT_ROOT=/workspace` for the same reason; do not
+>   override it.
 
 `modal_app.py` also bakes the deploy-time values of `ACESTEP_CONFIG_PATH`,
 `ACESTEP_LM_MODEL_PATH` and `ACESTEP_LM_BACKEND=pt` into the image as defaults, so a
 Secret that omits them still loads the models the image was built with. Values you do
-set in the Secret take precedence at runtime.
+set in the Secret take precedence at runtime — which is why the `ACESTEP_LM_BACKEND`
+note above matters.
+
+If the LM fails to load during the snapshot build, the server reports it as
+unavailable rather than retrying inside a request: a request-time reload would pick
+its own backend (`GenerateMusicRequest.lm_backend` defaults to `vllm` regardless of
+`ACESTEP_LM_BACKEND`) and pull several GB while a caller waits. Generations that need
+the LM then fail with a message pointing back here; redeploy so the snapshot captures
+it.
 
 ### GPU Auto-Selection
 

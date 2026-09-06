@@ -104,9 +104,20 @@ image = (
         "ACESTEP_CONFIG_PATH": CONFIG_PATH,
         "ACESTEP_LM_MODEL_PATH": LM_MODEL_PATH,
         # load_models() below pins the LM to the PyTorch backend for CRIU compatibility.
-        # api/llm_readiness.py reloads the LM from this env var if the snapshot load
-        # failed, and defaults to "vllm" when it is unset — which would silently swap
-        # backends mid-deployment.  Keep the two paths in agreement.
+        # This keeps the request-time LM paths in agreement with it: the
+        # /create_random_sample and /format_input routes read this variable
+        # directly and default to "vllm" when it is unset, which would swap in a
+        # CRIU-incompatible backend mid-deployment.
+        #
+        # It does NOT cover api/llm_readiness.py (the /release_task path): that
+        # resolves `req.lm_backend or os.getenv("ACESTEP_LM_BACKEND") or "vllm"`,
+        # and GenerateMusicRequest.lm_backend defaults to the string "vllm" rather
+        # than None, so the request always wins and this variable is never read
+        # there. api/startup_model_init.py closes that path instead, by marking the
+        # LM unavailable when the snapshot did not restore it.
+        #
+        # Note a Modal Secret overrides these image defaults, and .env.example ships
+        # ACESTEP_LM_BACKEND=vllm — see docs/en/MODAL_GUIDE.md.
         "ACESTEP_LM_BACKEND": "pt",
     })
     .add_local_dir(".", remote_path="/workspace", ignore=[".git", ".venv", "**/.venv", "__pycache__", "**/*.pyc", "checkpoints", "logs"], copy=True)

@@ -85,9 +85,9 @@ Added optional `preloaded_handler` and `preloaded_llm` parameters to `initialize
         added `ACESTEP_CHECKPOINTS_DIR` as a second override — both now resolve
         deterministically to the baked-in `/workspace/checkpoints`.
   - [x] Bake `ACESTEP_CONFIG_PATH` / `ACESTEP_LM_MODEL_PATH` / `ACESTEP_LM_BACKEND=pt`
-        into the image env so a Secret that omits them cannot load different models —
-        or, via `api/llm_readiness.py`, a different LM backend — than the image was
-        built with.
+        into the image env so a Secret that omits them cannot load different models than
+        the image was built with. **Correction (Phase 3.7):** the `ACESTEP_LM_BACKEND`
+        half does not reach `api/llm_readiness.py` as originally claimed — see below.
   - [x] Verify no test regressions against an `origin/main` baseline: 977 passed, and
         the failure set is identical apart from two `release_task_audio_paths_test`
         cases that only fail on the baseline because that checkout lived under `/tmp`
@@ -95,6 +95,35 @@ Added optional `preloaded_handler` and `preloaded_llm` parameters to `initialize
         reproduces on unmodified `main`.
   - [ ] **Human verification required:** run `uv run modal deploy modal_app.py` and
         exercise the deployed endpoint. No real deployment was made as part of this merge.
+- [ ] **Phase 3.7: Review Fixes for the Second Upstream Merge**
+  - [x] Close the request-time LM reload on snapshot deployments. Baking
+        `ACESTEP_LM_BACKEND=pt` into the image does not protect the `/release_task`
+        path: `api/llm_readiness.py` resolves
+        `req.lm_backend or os.getenv("ACESTEP_LM_BACKEND") or "vllm"`, and
+        `GenerateMusicRequest.lm_backend` defaults to the *string* `"vllm"` rather than
+        `None`, so the request always wins and the env var is never read. The pin does
+        still cover `/create_random_sample` and `/format_input`, which read it directly.
+        `startup_model_init` now marks the LM unavailable
+        (`_llm_lazy_load_disabled` + `_llm_init_error`) when the snapshot did not
+        restore it, so optional LLM features auto-disable and required ones fail with a
+        clear message instead of pulling nanovllm into a restored container.
+  - [x] Cover the fork's `save_audio` FLAC/WAV/WAV32 soundfile patch with tests. It is
+        the only fork divergence left in a file upstream actively edits, and the
+        upstream `audio_utils_test.py` adopted in Phase 3.6 asserts nothing about it —
+        a future merge could revert it with the suite still green, breaking FLAC and
+        WAV at runtime on Modal. Verified the new tests fail against both a simulated
+        revert and the pre-fix code.
+  - [x] Give the direct-soundfile path the same input normalization as upstream's
+        `_save_mp3` (`_to_soundfile_array`: detach, cpu, dim guard, contiguous).
+        Mono 1-D audio previously raised `IndexError` from an unconditional
+        `transpose(0, 1)`, in both the primary branch and the fallback.
+  - [x] Document the `ACESTEP_LM_BACKEND=pt` requirement in `docs/en/MODAL_GUIDE.md`.
+        `.env.example` ships `vllm` uncommented and a Modal Secret overrides the image
+        default, so the guide's own `--from-dotenv .env` step was undoing the pin.
+  - [ ] **Human verification still required:** as Phase 3.6. Note that DCW arrived with
+        the upstream merge and defaults *on* for turbo models
+        (`_resolve_dcw_enabled` → `is_turbo_model()`), so generated audio will differ
+        from the previous deployment even with an unchanged request payload.
 - [ ] **Phase 4: Future Improvements**
   - [ ] **nanovllm Memory Snapshot Compatibility** — The Modal deployment currently uses `backend="pt"` (PyTorch) for the LLM because nanovllm (`backend="vllm"`) contains CRIU-incompatible constructs (`threading.Lock`, `atexit.register`, `mp.get_context("spawn")`, CUDA graph capture) that prevent GPU memory snapshotting. The desired end state is to use the faster nanovllm backend with full snapshot support. Two paths forward:
     1. **Update nanovllm**: Refactor its `LLMEngine`/`ModelRunner` to defer CRIU-incompatible initialization (locks, atexit, multiprocessing, CUDA graphs) until after snapshot restore, or make them lazily initialized.

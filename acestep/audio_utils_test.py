@@ -335,6 +335,93 @@ class AudioSaverFormatTests(unittest.TestCase):
                     format="mp3",
                 )
 
+class AudioSaverSoundfileBackendTests(unittest.TestCase):
+    """Tests for the direct-soundfile FLAC/WAV/WAV32 save path.
+
+    This fork routes those three formats through ``soundfile.write`` instead of
+    ``torchaudio.save(backend='soundfile')``, because torchaudio 2.10 delegates
+    save() to torchcodec regardless of the backend argument and torchcodec needs
+    CUDA NPP libraries the Modal deployment image does not carry. Upstream still
+    uses torchaudio here, so these tests are the guard that keeps the divergence
+    from being silently reverted by a future upstream merge -- without them the
+    suite stays green while FLAC and WAV break at runtime on Modal.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.sample_audio = torch.randn(2, 48000)  # 2 channels, 1 second at 48kHz
+        self.sample_rate = 48000
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _save(self, fmt, audio=None):
+        """Save in ``fmt`` with both writers mocked; return the two mocks."""
+        saver = AudioSaver()
+        output_path = Path(self.temp_dir) / f"test_{fmt}"
+        with (
+            patch('soundfile.write') as mock_sf_write,
+            patch('acestep.audio_utils.torchaudio.save') as mock_torchaudio_save,
+        ):
+            saver.save_audio(
+                self.sample_audio if audio is None else audio,
+                output_path,
+                sample_rate=self.sample_rate,
+                format=fmt,
+            )
+        return mock_sf_write, mock_torchaudio_save
+
+    def test_flac_writes_via_soundfile_not_torchaudio(self):
+        """FLAC must not reach torchaudio.save -- torchcodec is unavailable."""
+        mock_sf_write, mock_torchaudio_save = self._save("flac")
+
+        mock_torchaudio_save.assert_not_called()
+        mock_sf_write.assert_called_once()
+        self.assertEqual(mock_sf_write.call_args[1]["format"], "FLAC")
+
+    def test_wav_writes_via_soundfile_as_pcm16(self):
+        """WAV must not reach torchaudio.save, and keeps 16-bit PCM output."""
+        mock_sf_write, mock_torchaudio_save = self._save("wav")
+
+        mock_torchaudio_save.assert_not_called()
+        mock_sf_write.assert_called_once()
+        self.assertEqual(mock_sf_write.call_args[1]["format"], "WAV")
+        self.assertEqual(mock_sf_write.call_args[1]["subtype"], "PCM_16")
+
+    def test_wav32_writes_via_soundfile_as_float(self):
+        """WAV32 must not reach torchaudio.save, and stays 32-bit float."""
+        mock_sf_write, mock_torchaudio_save = self._save("wav32")
+
+        mock_torchaudio_save.assert_not_called()
+        mock_sf_write.assert_called_once()
+        self.assertEqual(mock_sf_write.call_args[1]["format"], "WAV")
+        self.assertEqual(mock_sf_write.call_args[1]["subtype"], "FLOAT")
+
+    def test_soundfile_receives_sample_rate_and_samples_first_layout(self):
+        """soundfile takes [samples, channels]; the tensor arrives [channels, samples]."""
+        mock_sf_write, _ = self._save("flac")
+
+        write_args = mock_sf_write.call_args[0]
+        self.assertEqual(write_args[2], self.sample_rate)
+        self.assertEqual(write_args[1].shape, (48000, 2))
+
+    def test_mono_1d_audio_is_written_without_transposing(self):
+        """A 1-D mono tensor has no dimension 1 -- transposing it would raise."""
+        mock_sf_write, _ = self._save("flac", audio=torch.randn(48000))
+
+        mock_sf_write.assert_called_once()
+        self.assertEqual(mock_sf_write.call_args[0][1].shape, (48000,))
+
+    def test_audio_carrying_autograd_history_is_detached(self):
+        """.numpy() rejects a tensor that still requires grad."""
+        mock_sf_write, _ = self._save(
+            "flac", audio=torch.randn(2, 48000, requires_grad=True)
+        )
+
+        mock_sf_write.assert_called_once()
+
+
 class ApplyFadeTests(unittest.TestCase):
     """Tests for apply_fade function."""
 
