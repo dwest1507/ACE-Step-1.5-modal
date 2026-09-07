@@ -30,6 +30,13 @@ The DiT model controls audio generation quality. Set `ACESTEP_CONFIG_PATH` in yo
 
 The **XL (4B DiT)** models offer higher audio quality but require more VRAM (~9 GB for weights alone vs ~4.7 GB for standard models). They need at least 20 GB recommended, making A10G (24 GB) the minimum GPU for XL.
 
+> [!NOTE]
+> The image build pre-downloads only `acestep-v15-turbo` (it ships in the main
+> `ACE-Step/Ace-Step1.5` bundle) and, when the name contains `xl`, the matching XL repo.
+> Choosing `acestep-v15-sft` therefore leaves its weights out of the image, and the
+> container has to fetch them on the first cold start. Prefer the default or an XL model
+> unless you are prepared for that.
+
 ### Choosing an LM Model
 
 The LM model handles lyric/caption generation. Set `ACESTEP_LM_MODEL_PATH` in your `.env`:
@@ -106,34 +113,80 @@ You can make requests to your newly deployed API endpoint via `curl` or any othe
 To submit a full text-to-music configuration using one of the included example JSON payloads (like `examples/text2music/example_01.json`), use the `release_task` endpoint:
 
 ```bash
-curl -X POST "https://<YOUR-MODAL-WORKSPACE>--acestep-api-fastapi-app.modal.run/release_task" \
+curl -X POST "<YOUR-DEPLOYED-URL>/release_task" \
      -H "Content-Type: application/json" \
      -d @examples/text2music/example_01.json
 ```
 
-Alternatively, to generate a task description and submit a synchronous text-to-music task from a simple prompt (leveraging the LM):
+Two helper endpoints exist to build a payload for `/release_task`. Neither generates
+audio on its own.
+
+`/create_random_sample` returns one of the bundled example payloads at random, for
+pre-filling a UI form. It takes `sample_type` (`simple_mode` or `custom_mode`):
 
 ```bash
-curl -X POST "https://<YOUR-MODAL-WORKSPACE>--acestep-api-fastapi-app.modal.run/create_random_sample" \
+curl -X POST "<YOUR-DEPLOYED-URL>/create_random_sample" \
+     -H "Content-Type: application/json" \
+     -d '{"sample_type": "simple_mode"}'
+```
+
+`/v1/create_sample` is the one that uses the LM: give it a free-form `query` and it
+returns a generated caption, lyrics, BPM, key and time signature you can then post to
+`/release_task`. It accepts `query`, `instrumental`, `vocal_language` and `temperature`:
+
+```bash
+curl -X POST "<YOUR-DEPLOYED-URL>/v1/create_sample" \
      -H "Content-Type: application/json" \
      -d '{
-         "prompt": "Create an upbeat rock track with heavy guitars",
+         "query": "Create an upbeat rock track with heavy guitars",
          "vocal_language": "en"
      }'
 ```
 
-In the JSON response returned by either of these API calls, you will find a `result` object containing a field named `first_audio_path`. This represents your generated track's location within the remote container (for example, `/workspace/.cache/acestep/tmp/api_audio/2c9c279c-b3a8-42f0-a3e9-cf2ee2dbd021.mp3`). The unique UUID is randomly assigned for every new audio generation task.
+`/release_task` is asynchronous. It returns `{"task_id": ..., "status": "queued",
+"queue_position": ...}` — not the audio. Poll `/query_result` with that id until the
+job finishes:
 
-If you do not receive a response, check the App Logs in the Modal dashboard. The path should be listed there.
+```bash
+curl -X POST "<YOUR-DEPLOYED-URL>/query_result" \
+     -H "Content-Type: application/json" \
+     -d '{"task_id_list": ["<TASK-ID-FROM-RELEASE-TASK>"]}'
+```
+
+Each entry carries a `status` — `0` queued or running, `1` succeeded, `2` failed — and a
+`result` field holding a **JSON-encoded string**, which you must parse before reading it.
+Once `status` is `1`, the decoded result contains:
+
+- `first_audio_path` — a *relative URL*, already in the form
+  `/v1/audio?path=<url-encoded path>`. Append it to your deployment's base URL to
+  download; do not pass it to `/v1/audio` a second time.
+- `audio_paths` — the same relative URLs for every track in the batch.
+- `raw_audio_paths` — the underlying container paths (for example
+  `/workspace/.cache/acestep/tmp/api_audio/2c9c279c-....mp3`), if you would rather build
+  the query string yourself. The UUID is assigned per generation.
+
+If you do not receive a response, check the App Logs in the Modal dashboard.
 
 Please note, the first time you deploy the model, it will take a few minutes to download the model weights to the container. Subsequent deployments will be much faster as the model weights will be cached. Also, your modal deployment will scale to zero when not in use, so you will not be charged for compute time when the model is not in use. But as a result, there will be cold starts for your first request after a 5-minute period of inactivity. This will result in a longer response time for the first request (around 1 minute). Subsequent requests will be faster as the model will be cached. This can all be customized in modal_app.py if you desire. This default behavior is optimized for cost savings not performance.
 
-To download this file from your Modal app to your local machine, use the `/v1/audio` endpoint and pass this exact path:
+To download the track, append `first_audio_path` to your base URL as-is:
 
 ```bash
-curl -o downloaded_track.mp3 "https://<YOUR-MODAL-WORKSPACE>--acestep-api-fastapi-app.modal.run/v1/audio?path=/workspace/.cache/acestep/tmp/api_audio/2c9c279c-b3a8-42f0-a3e9-cf2ee2dbd021.mp3"
+# first_audio_path == "/v1/audio?path=%2Fworkspace%2F.cache%2Facestep%2Ftmp%2F..."
+curl -o downloaded_track.mp3 "<YOUR-DEPLOYED-URL><FIRST-AUDIO-PATH>"
 ```
 
-*(Note: Replace the URL with the exact URL provided by `uv run modal deploy`.)*
+Or build the query yourself from `raw_audio_paths`, URL-encoding the path:
+
+```bash
+curl -o downloaded_track.mp3 --get "<YOUR-DEPLOYED-URL>/v1/audio" \
+     --data-urlencode "path=/workspace/.cache/acestep/tmp/api_audio/2c9c279c-....mp3"
+```
+
+> [!NOTE]
+> `<YOUR-DEPLOYED-URL>` throughout this section is the `*.modal.run` URL that
+> `uv run modal deploy modal_app.py` prints when the deploy finishes; it is also shown
+> on the app's page in the Modal dashboard. Copy it from there rather than assembling it
+> by hand.
 
 For a full list of API endpoints, refer to the [REST API Guide](./API.md).
