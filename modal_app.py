@@ -69,17 +69,17 @@ def _modal_gpu_string() -> str:
     LM model size:
       Standard DiT + 0.6B LM → L4   (24 GB, cost-effective)
       Standard DiT + 1.7B LM → A10G (24 GB, good balance)
-      XL DiT (any LM)        → A10G (24 GB, ≥20GB recommended for XL)
-      4B LM (any DiT)        → A100 (40/80 GB, required for largest LM)
+      XL DiT + any LM ≤1.7B  → L40S (48 GB, good value for XL)
+      4B LM (any DiT)        → H100 (80 GB, max speed for largest combo)
     """
     lm = LM_MODEL_PATH.upper()
     config = CONFIG_PATH.upper()
     xl_dit = "XL" in config
 
     if "4B" in lm:
-        return "A100"
+        return "H100"
     elif xl_dit or "1.7B" in lm:
-        return "A10G"
+        return "L40S"
     else:
         return "L4"
 
@@ -149,7 +149,7 @@ image = (
     enable_memory_snapshot=True,
     experimental_options={"enable_gpu_snapshot": True},
     image=image,
-    gpu=_modal_gpu_string(),  # resolved from LM_MODEL_PATH at deploy time (string-only, no torch)
+    gpu=_modal_gpu_string(),  # resolved from model config at deploy time (see docstring above)
     scaledown_window=300,     # Keep the container warm for 5 minutes after last request
     timeout=3600,
     secrets=[

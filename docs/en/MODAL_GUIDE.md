@@ -90,9 +90,9 @@ The GPU is automatically selected based on your model combination:
 | Configuration | GPU | VRAM |
 |--------------|-----|------|
 | Standard DiT + 0.6B LM | L4 | 24 GB |
-| Standard DiT + 1.7B LM | A10G | 24 GB |
-| XL DiT + any LM (except 4B) | A10G | 24 GB |
-| Any DiT + 4B LM | A100 | 40/80 GB |
+| Standard DiT + 1.7B LM | L40S | 48 GB |
+| XL DiT + any LM (except 4B) | L40S | 48 GB |
+| Any DiT + 4B LM | H100 | 80 GB |
 
 *Caution: Compute costs increase with GPU tier. Please refer to the [Modal pricing page](https://modal.com/pricing) for more information.*
 
