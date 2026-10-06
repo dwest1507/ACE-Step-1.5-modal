@@ -70,14 +70,19 @@ def _modal_gpu_string() -> str:
       Standard DiT + 0.6B LM → L4   (24 GB, cost-effective)
       Standard DiT + 1.7B LM → A10G (24 GB, good balance)
       XL DiT + any LM ≤1.7B  → L40S (48 GB, good value for XL)
-      4B LM (any DiT)        → H100 (80 GB, max speed for largest combo)
+      4B LM (any DiT)        → H100! (80 GB, max speed for largest combo)
+
+    The "!" stops Modal from silently upgrading an H100 request to an H200.
+    Memory snapshots are specific to the GPU type, so letting the type vary
+    doubles the snapshots to build, and each miss is a ~6 minute cold start
+    that rebuilds one instead of a ~10 second restore.
     """
     lm = LM_MODEL_PATH.upper()
     config = CONFIG_PATH.upper()
     xl_dit = "XL" in config
 
     if "4B" in lm:
-        return "H100"
+        return "H100!"
     elif xl_dit or "1.7B" in lm:
         return "L40S"
     else:
