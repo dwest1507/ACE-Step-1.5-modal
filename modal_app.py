@@ -152,10 +152,29 @@ image = (
     gpu=_modal_gpu_string(),  # resolved from model config at deploy time (see docstring above)
     scaledown_window=300,     # Keep the container warm for 5 minutes after last request
     timeout=3600,
+    # Tasks live only in this container's memory: /release_task enqueues the job and
+    # returns, a background worker runs the GPU work, and /query_result reads the
+    # in-process job store.  Two consequences follow, and both broke production:
+    #
+    #   1. Modal only counts in-flight *inputs* as work.  A container running a job
+    #      in its background worker looks idle, and when the app is overprovisioned
+    #      Modal stops idle containers before scaledown_window elapses — killing the
+    #      generation mid-inference.
+    #   2. A poll routed to any other container finds no such task and answers
+    #      "status 0, result []", indistinguishable from "still queued".
+    #
+    # One container, serving every request concurrently, removes both: there is no
+    # sibling to route a poll to, and no surplus for the autoscaler to trim.  GPU
+    # work is still serialized by the API server's own job queue.
+    max_containers=1,
     secrets=[
         modal.Secret.from_name("ace-step-api-secrets")
     ]
 )
+# Without this each container takes one HTTP request at a time, so a single cold
+# start — /release_task held open, plus /health, warmup and status polls queued
+# behind it — makes the autoscaler boot an extra H100 for every waiting request.
+@modal.concurrent(max_inputs=100)
 class AceStepAPI:
     @modal.enter(snap=True)
     def load_models(self):
